@@ -1,0 +1,3 @@
+[submodule "isla-snapshots"]
+	path = isla-snapshots
+	url = git@github.com:rems-project/isla-snapshots

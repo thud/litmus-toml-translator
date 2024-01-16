@@ -1,10 +1,18 @@
 [package]
-name = "litmus-translator"
+name = "litmus-toml-translator"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jasper <jhwp2@cam.ac.uk>"]
 readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[build-dependencies]
+lalrpop = "0.19.0"
+isla-lib = { path = "isla/isla-lib" }
 
 [dependencies]
+regex = "1.10"
+toml = "0.5"
+lalrpop-util = "0.19.0"
+
+isla-axiomatic = { path = "isla/isla-axiomatic" }
+isla-lib = { path = "isla/isla-lib" }
