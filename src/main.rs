@@ -57,9 +57,11 @@ fn load_aarch64_config_irx() -> Result<DeserializedArchitecture<B64>, String> {
     let mut version = vec![0; usize::from_le_bytes(len)];
     buf.read_exact(&mut version).unwrap(); //(IOError)?;
 
-    if version != env!("ISLA_VERSION").as_bytes() {
-        let v = String::from_utf8_lossy(&version).into_owned();
-        panic!("Isla version mismatch (got {v})");
+    let v_exp = env!("ISLA_VERSION").as_bytes();
+    if version != v_exp {
+        let v_got = String::from_utf8_lossy(&version).into_owned();
+        let v_exp = String::from_utf8_lossy(&v_exp).into_owned();
+        panic!("Isla version mismatch (got {v_got}, expected {v_exp})");
     }
 
     buf.read_exact(&mut len).unwrap(); //(IOError)?;
