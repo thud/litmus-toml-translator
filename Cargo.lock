@@ -534,7 +534,9 @@ dependencies = [
  "isla-lib",
  "lalrpop",
  "lalrpop-util",
+ "once_cell",
  "regex",
+ "thiserror",
  "toml",
 ]
 
