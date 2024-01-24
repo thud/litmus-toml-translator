@@ -57,6 +57,7 @@ pub enum Reg {
     Q(u8), // Q0..Q30 General purpose floating point reg (all 128 bits)
     // V(u8, u8)   // V[0..30].[0..?] General purpose floating point reg (vec)
     PState(String), // PSTATE regs
+    VBar(String),   // VBAR regs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,23 @@ impl TryFrom<&Exp<String>> for MovSrc {
 
     fn try_from(exp: &Exp<String>) -> Result<Self> {
         // eprintln!("exp {exp:?}");
+
+        fn bv_from_exp(exp: &Exp<String>) -> Result<B64> {
+            match exp {
+                Exp::Nat(n) => Ok(B64::new(*n, 64)),
+                Exp::Bin(s) | Exp::Hex(s) => {
+                    B64::from_str(s).ok_or_else(|| Error::ParseExp(format!("couldn't create B64 from {s}")))
+                }
+                Exp::Bits64(bits, _len) => Ok(B64::new(*bits, 64)),
+                exp => Err(Error::ParseExp(format!("couldn't create B64 from {exp:?}"))),
+            }
+        }
+
+        fn get_arg<'a>(fun: &str, args: &'a [Exp<String>], idx: usize) -> Result<&'a Exp<String>> {
+            args.get(idx).ok_or_else(|| Error::GetFunctionArg(format!("{fun}:arg{idx}")))
+        }
+
+        log::info!("parsing {exp:?}");
         match exp {
             Exp::Nat(n) => Ok(Self::Nat(B64::new(*n, 64))),
             Exp::Bin(s) => {
@@ -115,7 +133,68 @@ impl TryFrom<&Exp<String>> for MovSrc {
             }
             Exp::Bits64(bits, _len) => Ok(Self::Bin(B64::new(*bits, 64))),
             Exp::Loc(var) => Ok(Self::Reg(var.clone())),
-            _ => panic!(),
+
+            Exp::App(f, args, _kwargs) => match f.as_ref() {
+                "extz" => get_arg(f, args, 0)?.try_into(),
+                "exts" => {
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let extend_by = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
+                    Ok(mov_src.map(|bv| bv.sign_extend(extend_by)))
+                }
+                "bvand" => {
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
+                    Ok(mov_src_bv1.map(|bv1| bv1 & bv2))
+                }
+                "bvor" => {
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
+                    Ok(mov_src_bv1.map(|bv1| bv1 | bv2))
+                }
+                "bvxor" => {
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
+                    Ok(mov_src_bv1.map(|bv1| bv1 ^ bv2))
+                }
+                "bvlshr" => {
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
+                    Ok(mov_src.map(|bv1| bv1 >> shift_by))
+                }
+                "bvshl" => {
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
+                    Ok(mov_src.map(|bv1| bv1 << shift_by))
+                }
+                "pte3" => {
+                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
+                        Ok(MovSrc::Pte(var.clone()))
+                    } else {
+                        Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
+                    }
+                }
+                "desc" => {
+                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
+                        Ok(MovSrc::Desc(var.to_owned()))
+                    } else {
+                        Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
+                    }
+                }
+                "vector_subrange" => {
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let from = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
+                    let len = bv_from_exp(get_arg(f, args, 2)?)?.lower_u64() as u32;
+                    Ok(mov_src.map(|bv| bv.slice(from, len).unwrap()))
+                }
+                "page" | "offset" => Err(Error::Unsupported(format!("function {f} not supported"))),
+                // "page" => {
+                //     let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                //     Ok(mov_src.map(|bv| bv.slice(12, 36).unwrap()))
+                // }
+                // TODO: offset()
+                f => Err(Error::UnimplementedFunction(f.to_owned())),
+            },
+            other => Err(Error::ParseResetValue(format!("handling of {other:?} is not implemented"))),
         }
     }
 }
@@ -146,6 +225,7 @@ impl Reg {
             Q(n) => "q".to_owned() + &n.to_string(),
 
             PState(_) => unimplemented!("Converting PSTATE regs to asm is not implemented properly yet."),
+            VBar(_) => unimplemented!("Converting PSTATE regs to asm is not implemented properly yet."),
         }
     }
 
@@ -185,6 +265,10 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
 
     if asm.starts_with("PSTATE") {
         return Ok(Reg::PState(asm.to_owned()));
+    }
+
+    if asm.starts_with("VBAR") {
+        return Ok(Reg::VBar(asm.to_owned()));
     }
 
     let (t, idx) = asm.split_at(1);

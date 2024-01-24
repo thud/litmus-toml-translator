@@ -16,81 +16,10 @@ use crate::error::{Error, Result};
 use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread};
 
 fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
-    let parsed =
-        axiomatic_litmus::parse_reset_value(unparsed_val, symtab).map_err(|e| Error::ParseResetValue(e.to_string()))?;
+    let parsed = &axiomatic_litmus::parse_reset_value(unparsed_val, symtab)
+        .map_err(|e| Error::ParseResetValue(e.to_string()))?;
 
-    fn bv_from_exp(exp: &Exp<String>) -> Result<B64> {
-        match exp {
-            Exp::Nat(n) => Ok(B64::new(*n, 64)),
-            Exp::Bin(s) | Exp::Hex(s) => {
-                B64::from_str(s).ok_or_else(|| Error::ParseExp(format!("couldn't create B64 from {s}")))
-            }
-            Exp::Bits64(bits, _len) => Ok(B64::new(*bits, 64)),
-            exp => Err(Error::ParseExp(format!("couldn't create B64 from {exp:?}"))),
-        }
-    }
-
-    fn get_arg<'a>(fun: &str, args: &'a [Exp<String>], idx: usize) -> Result<&'a Exp<String>> {
-        args.get(idx).ok_or_else(|| Error::GetFunctionArg(format!("{fun}:arg{idx}")))
-    }
-
-    fn finalise_val(exp: &Exp<String>) -> Result<MovSrc> {
-        // TODO: remove these unwraps
-        match exp {
-            Exp::Loc(..) | Exp::Bin(..) | Exp::Hex(..) | Exp::Nat(..) => Ok(exp.try_into()?),
-            Exp::App(f, args, _kwargs) => match f.as_ref() {
-                "extz" => finalise_val(get_arg(f, args, 0)?),
-                "exts" => {
-                    let mov_src: MovSrc = exp.try_into()?;
-                    let extend_by = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
-                    Ok(mov_src.map(|bv| bv.sign_extend(extend_by)))
-                }
-                "bvand" => {
-                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
-                    Ok(mov_src_bv1.map(|bv1| bv1 & bv2))
-                }
-                "bvor" => {
-                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
-                    Ok(mov_src_bv1.map(|bv1| bv1 | bv2))
-                }
-                "bvxor" => {
-                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
-                    Ok(mov_src_bv1.map(|bv1| bv1 ^ bv2))
-                }
-                "bvlshr" => {
-                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
-                    Ok(mov_src.map(|bv1| bv1 >> shift_by))
-                }
-                "bvshl" => {
-                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
-                    Ok(mov_src.map(|bv1| bv1 << shift_by))
-                }
-                "pte3" => {
-                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
-                        Ok(MovSrc::Pte(var.clone()))
-                    } else {
-                        Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
-                    }
-                }
-                "desc" => {
-                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
-                        Ok(MovSrc::Desc(var.to_owned()))
-                    } else {
-                        Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
-                    }
-                }
-                f => Err(Error::UnimplementedFunction(f.to_owned())),
-            },
-            other => Err(Error::ParseResetValue(format!("handling of {other:?} is not implemented"))),
-        }
-    }
-
-    finalise_val(&parsed)
+    parsed.try_into()
 }
 
 fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<HashMap<Reg, MovSrc>> {
@@ -117,6 +46,7 @@ fn merge_inits_resets(
         match reg {
             // TODO: not all special registers are PSTATEs
             Reg::PState(_) => special.insert(reg, val),
+            Reg::VBar(_) => special.insert(reg, val),
             _ => gp.insert(reg, val),
         };
     }
@@ -217,24 +147,39 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
 fn get_additional_vars_from_pts(
     page_table_setup: &Vec<page_table::setup::Constraint>,
     existing_vars: Vec<String>,
-) -> Vec<String> {
-    use page_table::setup::{Constraint, Exp, TableConstraint};
+) -> Result<Vec<String>> {
+    use page_table::setup::{AddressConstraint::*, Constraint::*, Exp, TableConstraint::*};
     let existing_vars: BTreeSet<String> = existing_vars.into_iter().collect();
     let mut all_vars = BTreeSet::new();
     for constraint in page_table_setup {
         match constraint {
-            Constraint::Initial(Exp::Id(id), _) => {
+            Initial(Exp::Id(id), _) => {
                 all_vars.insert(id.clone());
             }
-            Constraint::Table(TableConstraint::MapsTo(Exp::Id(from), Exp::Id(to), ..)) => {
+            Table(MapsTo(Exp::Id(from), Exp::Id(to), ..)) => {
                 all_vars.insert(from.clone());
                 all_vars.insert(to.clone());
             }
-            e => log::warn!("Not parsing additional vars from {e:?}"),
+            Address(Physical(_, ps)) => {
+                // TODO: we should take into account region ownership/pinning.
+                for p in ps {
+                    all_vars.insert(p.clone());
+                }
+            }
+            Address(Virtual(_, vs)) => {
+                for v in vs {
+                    all_vars.insert(v.clone());
+                }
+            }
+            Address(Intermediate(..)) => {
+                return Err(Error::Unsupported("intermediate addresses are not supported".to_owned()))
+            }
+            Address(Function(f, ..), ..) if f == "PAGE" || f == "PAGEOFF" => {}
+            e => log::warn!("Ignoring page table constraint {e:?}"),
         };
     }
 
-    all_vars.difference(&existing_vars).cloned().collect()
+    Ok(all_vars.difference(&existing_vars).cloned().collect())
 }
 
 pub fn parse(contents: &str) -> Result<Litmus> {
@@ -298,7 +243,7 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         var_names.clone().into_iter().map(|var| InitState::Var(var, "0".to_owned())).collect()
     };
 
-    let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone());
+    let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone())?;
 
     let threads = litmus_toml
         .get("thread")

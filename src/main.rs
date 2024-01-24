@@ -93,7 +93,7 @@ fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, 
                 }
                 Err(error::Error::Unsupported(e)) => {
                     log::error!("unsupported test {output_path:?} {e}");
-                    eprintln!("{} {}", "Unsupported".red().bold(), file.as_os_str().to_string_lossy().bold(),);
+                    eprintln!("{} {}", "Unsupported".blue().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
                 Err(e) => {
                     log::error!("error translating test {output_path:?} {e}");
