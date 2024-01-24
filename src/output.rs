@@ -1,9 +1,9 @@
 use crate::error::Result;
-use crate::litmus::{Litmus, InitState, Reg};
+use crate::litmus::{InitState, Litmus, Reg};
 
 const INCLUDES: &str = "#include \"lib.h\"";
 
-pub fn write_output(litmus: Litmus) -> Result<()> {
+pub fn write_output(litmus: Litmus) -> Result<String> {
     // println!("{litmus:#?}");
     let name = litmus.name;
     let name_cleaned = name.clone();
@@ -152,7 +152,5 @@ litmus_test_t test /* {name_cleaned} */ = {{
 ",
     );
 
-    println!("{out}");
-
-    Ok(())
+    Ok(out)
 }

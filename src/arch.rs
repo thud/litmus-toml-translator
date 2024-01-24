@@ -41,15 +41,14 @@ pub fn load_aarch64_config_irx() -> Result<DeserializedArchitecture<B64>> {
     let ir: Vec<Def<Name, B64>> =
         serialize::deserialize(&raw_ir).ok_or(Error::LoadArchConfig("failed to deserialise armv8p5 ir".to_owned()))?;
     let (strings, files): (Vec<String>, Vec<String>) =
-        isla_lib::bincode::deserialize(&raw_symtab)
-                           .map_err(|e| Error::LoadArchConfig(e.to_string()))?;
+        isla_lib::bincode::deserialize(&raw_symtab).map_err(|e| Error::LoadArchConfig(e.to_string()))?;
 
     let arch = DeserializedArchitecture { files, strings, ir: ir.clone() };
 
     Ok(arch)
 }
 
-pub fn load_aarch64_isa<'a>(arch: &'a DeserializedArchitecture<B64>, mmu_on: bool) -> Result<(ISAConfig<B64>, Symtab<'a>)> {
+pub fn load_aarch64_isa(arch: &DeserializedArchitecture<B64>, mmu_on: bool) -> Result<(ISAConfig<B64>, Symtab)> {
     let symtab = Symtab::from_raw_table(&arch.strings, &arch.files);
     let type_info = IRTypeInfo::new(&arch.ir);
     let isa = if mmu_on {
@@ -58,7 +57,8 @@ pub fn load_aarch64_isa<'a>(arch: &'a DeserializedArchitecture<B64>, mmu_on: boo
             None,
             &symtab,
             &type_info,
-        ).map_err(Error::LoadArchConfig)?
+        )
+        .map_err(Error::LoadArchConfig)?
     } else {
         // assert!(
         //     litmus_toml.get("symbolic").is_none(),
@@ -69,7 +69,8 @@ pub fn load_aarch64_isa<'a>(arch: &'a DeserializedArchitecture<B64>, mmu_on: boo
             None,
             &symtab,
             &type_info,
-        ).map_err(Error::LoadArchConfig)?
+        )
+        .map_err(Error::LoadArchConfig)?
     };
     Ok((isa, symtab))
 }

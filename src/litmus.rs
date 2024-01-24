@@ -102,17 +102,15 @@ impl TryFrom<&Exp<String>> for MovSrc {
     type Error = Error;
 
     fn try_from(exp: &Exp<String>) -> Result<Self> {
-        eprintln!("exp {exp:?}");
+        // eprintln!("exp {exp:?}");
         match exp {
             Exp::Nat(n) => Ok(Self::Nat(B64::new(*n, 64))),
             Exp::Bin(s) => {
-                let b64 = u64::from_str_radix(s, 2)
-                    .or_else(|e| Err(Error::ParseBitsFromString(e)))?;
+                let b64 = u64::from_str_radix(s, 2).map_err(Error::ParseBitsFromString)?;
                 Ok(Self::Bin(B64::new(b64, 64)))
             }
             Exp::Hex(s) => {
-                let b64 = u64::from_str_radix(s, 16)
-                    .or_else(|e| Err(Error::ParseBitsFromString(e)))?;
+                let b64 = u64::from_str_radix(s, 16).map_err(Error::ParseBitsFromString)?;
                 Ok(Self::Hex(B64::new(b64, 64)))
             }
             Exp::Bits64(bits, _len) => Ok(Self::Bin(B64::new(*bits, 64))),
@@ -190,9 +188,7 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
     }
 
     let (t, idx) = asm.split_at(1);
-    let idx: u8 = idx
-        .parse()
-        .map_err(|e: std::num::ParseIntError| Error::ParseReg(e.to_string()))?;
+    let idx: u8 = idx.parse().map_err(|e: std::num::ParseIntError| Error::ParseReg(e.to_string()))?;
     match t {
         "x" | "X" => Ok(X(idx)),
         "w" | "W" => Ok(W(idx)),
@@ -203,7 +199,7 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
         "q" | "Q" => Ok(Q(idx)),
 
         "r" | "R" => Ok(X(idx)), // TODO: this should use register renames
-        t => Err(Error::ParseReg(format!("{t}"))),
+        t => Err(Error::ParseReg(t.to_string())),
     }
 }
 
@@ -228,4 +224,3 @@ pub fn gen_init_state(page_table_setup: &[page_table::setup::Constraint]) -> Vec
         })
         .collect()
 }
-

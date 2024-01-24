@@ -1,25 +1,30 @@
 use std::collections::{BTreeSet, HashMap};
 
-use toml::Value;
+use once_cell::sync::Lazy;
+
 use isla_axiomatic::litmus::exp::{Exp, Loc};
 use isla_axiomatic::litmus::{self as axiomatic_litmus, exp_lexer, exp_parser};
 use isla_axiomatic::page_table;
 use isla_lib::bitvector::{b64::B64, BV};
+use isla_lib::ir::serialize::DeserializedArchitecture;
 use isla_lib::ir::Symtab;
 use isla_lib::zencode;
+use toml::Value;
 
 use crate::arch;
-use crate::litmus::{self, Litmus, InitState, Reg, Thread, MovSrc};
 use crate::error::{Error, Result};
+use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread};
 
 fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
-    let parsed = axiomatic_litmus::parse_reset_value(unparsed_val, symtab)
-        .map_err(|e| Error::ParseResetValue(e.to_string()))?;
+    let parsed =
+        axiomatic_litmus::parse_reset_value(unparsed_val, symtab).map_err(|e| Error::ParseResetValue(e.to_string()))?;
 
     fn bv_from_exp(exp: &Exp<String>) -> Result<B64> {
         match exp {
             Exp::Nat(n) => Ok(B64::new(*n, 64)),
-            Exp::Bin(s) | Exp::Hex(s) => B64::from_str(s).ok_or_else(|| Error::ParseExp(format!("couldn't create B64 from {s}"))),
+            Exp::Bin(s) | Exp::Hex(s) => {
+                B64::from_str(s).ok_or_else(|| Error::ParseExp(format!("couldn't create B64 from {s}")))
+            }
             Exp::Bits64(bits, _len) => Ok(B64::new(*bits, 64)),
             exp => Err(Error::ParseExp(format!("couldn't create B64 from {exp:?}"))),
         }
@@ -34,65 +39,66 @@ fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
         match exp {
             Exp::Loc(..) | Exp::Bin(..) | Exp::Hex(..) | Exp::Nat(..) => Ok(exp.try_into()?),
             Exp::App(f, args, _kwargs) => match f.as_ref() {
-                "extz" => finalise_val(get_arg(&f, args, 0)?),
+                "extz" => finalise_val(get_arg(f, args, 0)?),
                 "exts" => {
                     let mov_src: MovSrc = exp.try_into()?;
-                    let extend_by = bv_from_exp(get_arg(&f, args, 1)?)?.lower_u64() as u32;
+                    let extend_by = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
                     Ok(mov_src.map(|bv| bv.sign_extend(extend_by)))
                 }
                 "bvand" => {
-                    let mov_src_bv1: MovSrc = get_arg(&f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(&f, args, 1)?.clone())?;
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src_bv1.map(|bv1| bv1 & bv2))
                 }
                 "bvor" => {
-                    let mov_src_bv1: MovSrc = get_arg(&f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(&f, args, 1)?.clone())?;
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src_bv1.map(|bv1| bv1 | bv2))
                 }
                 "bvxor" => {
-                    let mov_src_bv1: MovSrc = get_arg(&f, args, 0)?.try_into()?;
-                    let bv2 = bv_from_exp(&get_arg(&f, args, 1)?.clone())?;
+                    let mov_src_bv1: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let bv2 = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src_bv1.map(|bv1| bv1 ^ bv2))
                 }
                 "bvlshr" => {
-                    let mov_src: MovSrc = get_arg(&f, args, 0)?.try_into()?;
-                    let shift_by = bv_from_exp(&get_arg(&f, args, 1)?.clone())?;
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src.map(|bv1| bv1 >> shift_by))
                 }
                 "bvshl" => {
-                    let mov_src: MovSrc = get_arg(&f, args, 0)?.try_into()?;
-                    let shift_by = bv_from_exp(&get_arg(&f, args, 1)?.clone())?;
+                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
+                    let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src.map(|bv1| bv1 << shift_by))
                 }
                 "pte3" => {
-                    if let Exp::Loc(var) = get_arg(&f, args, 0)? {
+                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
                         Ok(MovSrc::Pte(var.clone()))
                     } else {
                         Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
                     }
                 }
                 "desc" => {
-                    if let Exp::Loc(var) = get_arg(&f, args, 0)? {
+                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
                         Ok(MovSrc::Desc(var.to_owned()))
                     } else {
                         Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
                     }
                 }
-                f => Err(Error::UnimplementedFunction(f.to_owned()))
+                f => Err(Error::UnimplementedFunction(f.to_owned())),
             },
-            other => Err(Error::ParseResetValue(format!("handling of {other:?} is not implemented")))
+            other => Err(Error::ParseResetValue(format!("handling of {other:?} is not implemented"))),
         }
     }
 
-    Ok(finalise_val(&parsed)?)
+    finalise_val(&parsed)
 }
 
 fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<HashMap<Reg, MovSrc>> {
     if let Some(unparsed_resets) = unparsed_resets {
         unparsed_resets
             .as_table()
-            .ok_or_else(|| "Thread init/reset must be a list of register name/value pairs".to_string()).map_err(Error::ParseResetValue)?
+            .ok_or_else(|| "Thread init/reset must be a list of register name/value pairs".to_string())
+            .map_err(Error::ParseResetValue)?
             .into_iter()
             .map(|(reg, val)| Ok((litmus::parse_reg_from_str(reg)?, parse_reset_val(val, symtab)?)))
             .collect()
@@ -172,8 +178,7 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
     fn extract_regs_from_exp(symtab: &Symtab, set: &mut BTreeSet<(u8, Reg)>, exp: Exp<String>) -> Result<()> {
         match exp {
             Exp::EqLoc(Loc::Register { reg, thread_id }, _exp) => {
-                let thread_id = thread_id.try_into()
-                    .map_err(|e| Error::ParseThread(format!("{e}")))?;
+                let thread_id = thread_id.try_into().map_err(|e| Error::ParseThread(format!("{e}")))?;
                 set.insert((thread_id, litmus::parse_reg_from_str(&zencode::decode(symtab.to_str(reg)))?));
                 Ok(())
             }
@@ -190,7 +195,9 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
                 Ok(())
             }
             // TODO: Currently ignoring function application
-            exp => Err(Error::ParseFinalAssertion(format!("Can't yet use final assertions with complex terms {exp:?}"))),
+            exp => {
+                Err(Error::ParseFinalAssertion(format!("Can't yet use final assertions with complex terms {exp:?}")))
+            }
             // Exp::Loc(A),
             // Exp::Label(String),
             // Exp::True,
@@ -234,8 +241,8 @@ pub fn parse(contents: &str) -> Result<Litmus> {
     let litmus_toml = contents.parse::<Value>().map_err(Error::ParseToml)?;
 
     let mmu_on = litmus_toml.get("page_table_setup").is_some();
-    let arch = arch::load_aarch64_config_irx()?;
-    let (isa, symtab) = arch::load_aarch64_isa(&arch, mmu_on)?;
+    static ARCH: Lazy<DeserializedArchitecture<B64>> = Lazy::new(|| arch::load_aarch64_config_irx().unwrap());
+    let (isa, symtab) = arch::load_aarch64_isa(&ARCH, mmu_on)?;
 
     let arch =
         litmus_toml.get("arch").and_then(|n| n.as_str().map(str::to_string)).unwrap_or_else(|| "unknown".to_string());
@@ -251,24 +258,29 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         .get("symbolic")
         .or(litmus_toml.get("addresses"))
         .and_then(Value::as_array)
-        .ok_or_else(|| Error::GetTomlValue("Symbolic addresses found in litmus file".to_owned()))?;
+        .ok_or_else(|| Error::GetTomlValue("No symbolic addresses found in litmus file".to_owned()))?;
 
     let var_names: Vec<String> = symbolic.iter().map(Value::as_str).map(|v| v.unwrap().to_owned()).collect();
 
     let (page_table_setup, page_table_setup_source) = if let Some(setup) = litmus_toml.get("page_table_setup") {
         if litmus_toml.get("locations").is_some() {
-            return Err(Error::GetTomlValue("Cannot have a page_table_setup and locations in the same test".to_owned()));
+            return Err(Error::GetTomlValue(
+                "Cannot have a page_table_setup and locations in the same test".to_owned(),
+            ));
         }
         if let Some(litmus_setup) = setup.as_str() {
             let setup = format!("{}{}", isa.default_page_table_setup, litmus_setup);
             let lexer = page_table::setup_lexer::SetupLexer::new(&setup);
             (
-                page_table::setup_parser::SetupParser::new().parse(&isa, lexer).map_err(|error| {
-                    axiomatic_litmus::format_error_page_table_setup(
-                        litmus_setup,
-                        error.map_location(|pos| pos - isa.default_page_table_setup.len()),
-                    )
-                }).map_err(Error::PageTableSetup)?,
+                page_table::setup_parser::SetupParser::new()
+                    .parse(&isa, lexer)
+                    .map_err(|error| {
+                        axiomatic_litmus::format_error_page_table_setup(
+                            litmus_setup,
+                            error.map_location(|pos| pos - isa.default_page_table_setup.len()),
+                        )
+                    })
+                    .map_err(Error::PageTableSetup)?,
                 litmus_setup.to_string(),
             )
         } else {
@@ -278,7 +290,7 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         (Vec::new(), "".to_string())
     };
 
-    eprintln!("{page_table_setup:#?}");
+    // eprintln!("{page_table_setup:#?}");
 
     let init_state = if mmu_on {
         litmus::gen_init_state(&page_table_setup)
@@ -288,14 +300,14 @@ pub fn parse(contents: &str) -> Result<Litmus> {
 
     let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone());
 
-    let threads = litmus_toml.get("thread")
+    let threads = litmus_toml
+        .get("thread")
         .and_then(|t| t.as_table())
         .ok_or_else(|| Error::GetTomlValue("No threads found in litmus file (must be a toml table)".to_owned()))
-        .and_then(|t|
-            t.into_iter().map(|(name, thread)| parse_thread(name.as_ref(), thread, &symtab)).collect()
-        )?;
+        .and_then(|t| t.into_iter().map(|(name, thread)| parse_thread(name.as_ref(), thread, &symtab)).collect())?;
 
-    let fin = litmus_toml.get("final")
+    let fin = litmus_toml
+        .get("final")
         .ok_or_else(|| Error::GetTomlValue("No final section found in litmus file".to_owned()))?;
     let final_assertion = (match fin.get("assertion").and_then(Value::as_str) {
         Some(assertion) => {
@@ -308,7 +320,7 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         None => Err(Error::GetTomlValue("No final assertion found in litmus file".to_owned())),
     })?;
     let regs = regs_from_final_assertion(&symtab, final_assertion.clone())?;
-    eprintln!("Final assertion: {final_assertion:?}");
+    // eprintln!("Final assertion: {final_assertion:?}");
 
     Ok(Litmus {
         arch,

@@ -30,4 +30,6 @@ pub enum Error {
     ParseBitsFromString(ParseIntError),
     #[error("unimplemented function: {0}")]
     UnimplementedFunction(String),
+    #[error("test not supported: {0}")]
+    Unsupported(String),
 }
