@@ -7,6 +7,7 @@ mod parse;
 use std::io::Write;
 
 use clap::{CommandFactory, Parser};
+use colored::*;
 use is_terminal::IsTerminal;
 
 #[derive(Debug, Parser)]
@@ -50,36 +51,53 @@ fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, 
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|entry| entry.is_dir() || is_toml(entry));
-        if !out_dir.exists() {
-            eprintln!("creating dir {:?}", out_dir);
-            std::fs::create_dir_all(out_dir).unwrap();
-        }
         for input in files {
-            eprintln!("dir:{dir:?} input:{input:?}");
+            log::info!("dir:{dir:?} input:{input:?}");
             process_path(&input, &out_dir.join(std::path::PathBuf::from(input.file_name().unwrap())), force).unwrap();
         }
     } else {
         let file = file_or_dir;
         if !is_toml(file) {
-            eprintln!("skipping {file:?}");
+            log::info!("skipping {file:?}");
             return Ok(());
         }
         let file_name = file.file_name().unwrap().to_string_lossy().into_owned() + ".c";
         let output_path = out_dir.with_file_name(file_name);
         if output_path.exists() && !force {
-            eprintln!("file {output_path:?} exists. skipping...");
+            log::warn!("file {output_path:?} exists. skipping...");
+            eprintln!(
+                "{} {} ({} exists)",
+                "Skipping".yellow().bold(),
+                file.as_os_str().to_string_lossy().bold(),
+                output_path.as_os_str().to_string_lossy().bold(),
+            );
         } else {
             let toml = std::fs::read_to_string(file).unwrap();
             match process_toml(toml) {
                 Ok(output_code) => {
-                    eprintln!("creating file at {output_path:?}");
+                    if !out_dir.exists() {
+                        log::info!("creating dir {:?}", out_dir);
+                        std::fs::create_dir_all(out_dir).unwrap();
+                    }
+                    log::info!("creating file at {output_path:?}");
                     let mut f = std::fs::File::create(&output_path).unwrap();
-                    eprintln!("writing process_toml({file:?}) to {output_path:?}");
+                    log::info!("writing process_toml({file:?}) to {output_path:?}");
                     write!(f, "{output_code}").unwrap();
-                    eprintln!("successfully translated {file:?} -> {output_path:?}");
+                    log::info!("successfully translated {file:?} -> {output_path:?}");
+                    eprintln!(
+                        "{} {} -> {}",
+                        "Success".green().bold(),
+                        file.as_os_str().to_string_lossy().bold(),
+                        output_path.as_os_str().to_string_lossy().bold(),
+                    );
+                }
+                Err(error::Error::Unsupported(e)) => {
+                    log::error!("unsupported test {output_path:?} {e}");
+                    eprintln!("{} {}", "Unsupported".red().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
                 Err(e) => {
-                    eprintln!("failed to translate {output_path:?} {e}");
+                    log::error!("error translating test {output_path:?} {e}");
+                    eprintln!("{} translating {}", "Error".red().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
             }
         }
@@ -87,12 +105,25 @@ fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, 
     Ok(())
 }
 
+fn init_logger(verbosity: u8) {
+    let filter_level = match verbosity {
+        0 => log::LevelFilter::Off,
+        1 => log::LevelFilter::Warn,
+        2 => log::LevelFilter::Info,
+        3 => log::LevelFilter::Debug,
+        4.. => log::LevelFilter::Trace,
+    };
+    pretty_env_logger::formatted_builder().filter_level(filter_level).init();
+}
+
 fn main() {
     let cli = Cli::parse();
 
+    init_logger(cli.verbose);
+
     if let Some(out) = &cli.output {
         if out.exists() && !out.is_dir() && !cli.force {
-            eprintln!("output file {out:?} exists (and is not a directory). aborting...");
+            log::error!("output file {out:?} exists (and is not a directory). aborting...");
             std::process::exit(1); // TODO: better exit code here? (POSIX)
         }
     }
@@ -108,7 +139,7 @@ fn main() {
                     let toml = std::fs::read_to_string(path).unwrap();
                     match process_toml(toml) {
                         Ok(output_code) => println!("{output_code}"),
-                        Err(e) => eprintln!("failed to translate toml from stdin {e}"),
+                        Err(e) => log::error!("failed to translate toml from stdin {e}"),
                     };
                 } else {
                     // let parent = std::path::PathBuf::from(path.parent().unwrap());
@@ -136,7 +167,7 @@ fn main() {
                 if let Some(out) = &cli.output {
                     let mut f = std::fs::File::create(out).unwrap();
                     write!(f, "{output_code}").unwrap();
-                    eprintln!("successfully translated stdin -> {out:?}");
+                    log::info!("successfully translated stdin -> {out:?}");
                 } else {
                     println!("{output_code}");
                 }

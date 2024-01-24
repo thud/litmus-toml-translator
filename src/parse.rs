@@ -160,7 +160,7 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         let el_u8 = el_src.map(|mov_src| mov_src.bits().lower_u8()).unwrap_or(B64::zeros(64).lower_u8()); // By default EL = 0
 
         if el_u8 > 1 {
-            eprintln!("WARNING: EL > 1 not allowed");
+            log::warn!("WARNING: EL > 1 not allowed");
         }
         el_u8
     };
@@ -230,7 +230,7 @@ fn get_additional_vars_from_pts(
                 all_vars.insert(from.clone());
                 all_vars.insert(to.clone());
             }
-            e => eprintln!("Not parsing additional vars from {e:?}"),
+            e => log::warn!("Not parsing additional vars from {e:?}"),
         };
     }
 
