@@ -173,7 +173,7 @@ impl TryFrom<&Exp<String>> for MovSrc {
                         Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
                     }
                 }
-                "desc" => {
+                "desc3" => {
                     if let Exp::Loc(var) = get_arg(f, args, 0)? {
                         Ok(MovSrc::Desc(var.to_owned()))
                     } else {
