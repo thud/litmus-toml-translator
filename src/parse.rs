@@ -13,7 +13,7 @@ use toml::Value;
 
 use crate::arch;
 use crate::error::{Error, Result};
-use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread};
+use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread, ThreadSyncHandler};
 
 fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
     let parsed = &axiomatic_litmus::parse_reset_value(unparsed_val, symtab)
@@ -44,7 +44,7 @@ fn merge_inits_resets(
     let mut special = HashMap::new();
     for (reg, val) in inits.into_iter().chain(resets) {
         match reg {
-            // TODO: not all special registers are PSTATEs
+            // TODO: not all special registers are PSTATEs or VBAR
             Reg::PState(_) => special.insert(reg, val),
             Reg::VBar(_) => special.insert(reg, val),
             _ => gp.insert(reg, val),
@@ -76,6 +76,8 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         },
     }?;
 
+    let eret_reg = Reg::first_unused_gp(&regs_clobber).unwrap();
+
     let inits = parse_resets(thread.get("init"), symtab)?;
     let resets = parse_resets(thread.get("reset"), symtab)?;
     let (merged_resets, special_resets) = merge_inits_resets(inits, resets)?;
@@ -87,13 +89,16 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
             return Err(Error::ParseThread(format!("Invalid EL level ({r})")));
         }
 
-        let el_u8 = el_src.map(|mov_src| mov_src.bits().lower_u8()).unwrap_or(B64::zeros(64).lower_u8()); // By default EL = 0
+        let el_u8 = el_src.map(|mov_src| mov_src.bits().lower_u8()).unwrap_or(B64::new(1, 64).lower_u8()); // By default EL = 0
 
         if el_u8 > 1 {
-            log::warn!("WARNING: EL > 1 not allowed");
+            log::warn!("EL > 1 not allowed");
         }
         el_u8
     };
+
+    let vbar_el1 = special_resets.get(&Reg::VBar("VBAR_EL1".to_owned())).map(MovSrc::bits).copied();
+    let vbar_el2 = special_resets.get(&Reg::VBar("VBAR_EL2".to_owned())).map(MovSrc::bits).copied();
 
     Ok(Thread {
         name: thread_name.to_owned(),
@@ -101,7 +106,63 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         el,
         reset: merged_resets.into_iter().map(|(reg, val)| (reg, val.to_owned())).collect(),
         regs_clobber: regs_clobber.into_iter().collect(),
+        vbar_el1,
+        vbar_el2,
+        eret_reg,
     })
+}
+
+fn parse_thread_sync_handler_from_section(
+    handler_name: &str,
+    handler: &Value,
+    threads: &[Thread],
+    symtab: &Symtab,
+) -> Result<Option<ThreadSyncHandler>> {
+    if let Some(address) = handler.get("address") {
+        let address = parse_reset_val(address, symtab)?; // TODO: this is probably the wrong
+                                                         // parsing fn to use.
+        let address = address.bits();
+        fn address_is_relevant(address: B64, vbar: B64) -> bool {
+            let twelve = B64::new(12, 12); // TODO: this is inefficient
+            address >> twelve == vbar >> twelve
+        }
+        let threads_els = threads
+            .iter()
+            .filter_map(|t| match (t.vbar_el1, t.vbar_el2) {
+                (Some(vbar_el1), _) if address_is_relevant(*address, vbar_el1) => Some((t.name.parse().unwrap(), 1)),
+                (_, Some(vbar_el2)) if address_is_relevant(*address, vbar_el2) => Some((t.name.parse().unwrap(), 2)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let (thread, el) = match threads_els.len() {
+            1 if matches!(threads_els[0], (_, 0) | (_, 1)) => Ok(threads_els[0]),
+            2 => Err(Error::Unsupported("EL2 tests are not supported by system-litmus-harness".to_owned())),
+            0 => Err(Error::UnmatchedHandler(format!("{handler_name} at {address}"))),
+            n => Err(Error::UnmatchedHandler(format!("found {n} possible threads for handler {handler_name}"))),
+        }?;
+
+        let code = handler
+            .get("code")
+            .ok_or_else(|| Error::ParseThread(format!("No code or call found for thread {}", handler_name)))
+            .map(|code| code.as_str())
+            .and_then(|code| code.ok_or_else(|| Error::ParseThread("thread code must be a string".to_string())))
+            .map(|code| {
+                // Replace ERET if present with harness' ERET_TO_NEXT
+                let mut rev_lines = code.trim().split('\n').rev();
+                while let Some(line) = rev_lines.next() {
+                    if line.trim().starts_with("ERET") {
+                        return rev_lines.rev().collect::<Vec<_>>().join("\n");
+                    }
+                }
+                code.to_owned()
+            })?;
+
+        Ok(Some(ThreadSyncHandler { name: handler_name.to_owned(), code: code.to_owned(), el, thread }))
+    } else {
+        // Can't be a functioning thread sync handler.
+        Ok(None)
+    }
 }
 
 fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> Result<Vec<(u8, Reg)>> {
@@ -156,9 +217,15 @@ fn get_additional_vars_from_pts(
             Initial(Exp::Id(id), _) => {
                 all_vars.insert(id.clone());
             }
-            Table(MapsTo(Exp::Id(from), Exp::Id(to), ..)) => {
+            Table(MapsTo(Exp::Id(from), Exp::Id(to), _, lvl, _)) => {
+                if *lvl != 3 {
+                    eprintln!("--lvl!=3--");
+                    return Err(Error::Unsupported("intermediate addresses are not supported".to_owned()));
+                }
                 all_vars.insert(from.clone());
-                all_vars.insert(to.clone());
+                if to != "invalid" {
+                    all_vars.insert(to.clone());
+                }
             }
             Address(Physical(_, ps)) => {
                 // TODO: we should take into account region ownership/pinning.
@@ -172,7 +239,8 @@ fn get_additional_vars_from_pts(
                 }
             }
             Address(Intermediate(..)) => {
-                return Err(Error::Unsupported("intermediate addresses are not supported".to_owned()))
+                // TODO: we should allow this if var is never used.
+                return Err(Error::Unsupported("intermediate addresses are not supported".to_owned()));
             }
             Address(Function(f, ..), ..) if f == "PAGE" || f == "PAGEOFF" => {}
             e => log::warn!("Ignoring page table constraint {e:?}"),
@@ -245,11 +313,25 @@ pub fn parse(contents: &str) -> Result<Litmus> {
 
     let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone())?;
 
-    let threads = litmus_toml
+    let threads: Vec<Thread> = litmus_toml
         .get("thread")
         .and_then(|t| t.as_table())
         .ok_or_else(|| Error::GetTomlValue("No threads found in litmus file (must be a toml table)".to_owned()))
         .and_then(|t| t.into_iter().map(|(name, thread)| parse_thread(name.as_ref(), thread, &symtab)).collect())?;
+
+    let sections = litmus_toml
+        .get("section")
+        .map(|s| s.as_table().ok_or_else(|| Error::GetTomlValue("Thread sync handler is not a table".to_owned())))
+        .transpose()?
+        .cloned()
+        .unwrap_or_default();
+
+    let thread_sync_handlers = sections
+        .iter()
+        .filter_map(|(name, handler)| {
+            parse_thread_sync_handler_from_section(name, handler, &threads, &symtab).transpose()
+        })
+        .collect::<Result<_>>()?;
 
     let fin = litmus_toml
         .get("final")
@@ -274,6 +356,7 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         page_table_setup_source,
         page_table_setup,
         threads,
+        thread_sync_handlers,
         final_assertion: "test assertion TODO".to_owned(), //final_assertion,
         var_names,
         additional_vars,

@@ -30,6 +30,8 @@ pub enum Error {
     ParseBitsFromString(ParseIntError),
     #[error("unimplemented function: {0}")]
     UnimplementedFunction(String),
+    #[error("unable to match handler to a thread and EL: {0}")]
+    UnmatchedHandler(String),
     #[error("test not supported: {0}")]
     Unsupported(String),
 }

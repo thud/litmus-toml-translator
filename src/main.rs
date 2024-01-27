@@ -5,6 +5,7 @@ mod output;
 mod parse;
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser};
 use colored::*;
@@ -26,9 +27,9 @@ use is_terminal::IsTerminal;
 ))]
 struct Cli {
     #[arg(help = "input file(s) or dir of tests (instead of stdin)")]
-    input: Option<Vec<std::path::PathBuf>>,
+    input: Option<Vec<PathBuf>>,
     #[arg(short, long, help = "output file or dir (default is stdout)")]
-    output: Option<std::path::PathBuf>,
+    output: Option<PathBuf>,
     #[arg(short, long, help = "allow overwriting files with output")]
     force: bool,
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -40,11 +41,11 @@ fn process_toml(raw_toml: String) -> error::Result<String> {
     output::write_output(parsed_litmus)
 }
 
-fn is_toml(p: &dyn AsRef<std::path::Path>) -> bool {
-    p.as_ref().extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
+fn is_toml(p: &Path) -> bool {
+    p.extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
 }
 
-fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, force: bool) -> error::Result<()> {
+fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Result<()> {
     if file_or_dir.is_dir() {
         let dir = file_or_dir;
         let files = std::fs::read_dir(dir)
@@ -53,7 +54,7 @@ fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, 
             .filter(|entry| entry.is_dir() || is_toml(entry));
         for input in files {
             log::info!("dir:{dir:?} input:{input:?}");
-            process_path(&input, &out_dir.join(std::path::PathBuf::from(input.file_name().unwrap())), force).unwrap();
+            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force).unwrap();
         }
     } else {
         let file = file_or_dir;
@@ -75,10 +76,8 @@ fn process_path(file_or_dir: &std::path::PathBuf, out_dir: &std::path::PathBuf, 
             let toml = std::fs::read_to_string(file).unwrap();
             match process_toml(toml) {
                 Ok(output_code) => {
-                    if !out_dir.exists() {
-                        log::info!("creating dir {:?}", out_dir);
-                        std::fs::create_dir_all(out_dir).unwrap();
-                    }
+                    let parent = out_dir.parent().unwrap();
+                    std::fs::create_dir_all(parent).unwrap();
                     log::info!("creating file at {output_path:?}");
                     let mut f = std::fs::File::create(&output_path).unwrap();
                     log::info!("writing process_toml({file:?}) to {output_path:?}");
@@ -142,7 +141,7 @@ fn main() {
                         Err(e) => log::error!("failed to translate toml from stdin {e}"),
                     };
                 } else {
-                    // let parent = std::path::PathBuf::from(path.parent().unwrap());
+                    // let parent = PathBuf::from(path.parent().unwrap());
                     process_path(path, path, cli.force).unwrap();
                 }
             } else {
@@ -150,7 +149,7 @@ fn main() {
                     if let Some(out) = &cli.output {
                         process_path(&path, &out.join(path.file_name().unwrap()), cli.force).unwrap();
                     } else {
-                        let parent = std::path::PathBuf::from(path.parent().unwrap());
+                        let parent = PathBuf::from(path.parent().unwrap());
                         process_path(&path, &parent, cli.force).unwrap();
                     }
                 }

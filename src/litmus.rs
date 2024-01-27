@@ -18,6 +18,7 @@ pub struct Litmus {
     pub page_table_setup_source: String,
     pub page_table_setup: Vec<page_table::setup::Constraint>,
     pub threads: Vec<Thread>,
+    pub thread_sync_handlers: Vec<ThreadSyncHandler>,
     pub final_assertion: String, //exp::Exp<String>,
     pub var_names: Vec<String>,
     pub additional_vars: Vec<String>,
@@ -32,7 +33,18 @@ pub struct Thread {
     pub code: String,
     pub el: u8,
     pub regs_clobber: Vec<Reg>,
+    pub eret_reg: Reg,
+    pub vbar_el1: Option<B64>,
+    pub vbar_el2: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
+}
+
+#[derive(Debug)]
+pub struct ThreadSyncHandler {
+    pub name: String,
+    pub code: String,
+    pub thread: usize,
+    pub el: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +55,7 @@ pub enum MovSrc {
     Reg(String),
     Pte(String),
     Desc(String),
+    Page(String),
 }
 
 #[derive(Debug, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
@@ -58,6 +71,7 @@ pub enum Reg {
     // V(u8, u8)   // V[0..30].[0..?] General purpose floating point reg (vec)
     PState(String), // PSTATE regs
     VBar(String),   // VBAR regs
+    Isla(String),   // isla-specific register (ignored)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,14 +90,14 @@ impl MovSrc {
             Self::Nat(bv) => Self::Nat(f(*bv)),
             Self::Bin(bv) => Self::Bin(f(*bv)),
             Self::Hex(bv) => Self::Hex(f(*bv)),
-            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) => panic!(),
+            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) | Self::Page(_) => panic!(),
         }
     }
 
     pub fn bits(&self) -> &B64 {
         match self {
             Self::Nat(bv) | Self::Bin(bv) | Self::Hex(bv) => bv,
-            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) => panic!(),
+            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) | Self::Page(_) => panic!(),
         }
     }
 
@@ -95,6 +109,7 @@ impl MovSrc {
             Self::Reg(reg) => format!("%[{reg}]"),
             Self::Pte(sym) => format!("%[{sym}pte]"),
             Self::Desc(sym) => format!("%[{sym}desc]"),
+            Self::Page(sym) => format!("%[{sym}page]"),
         }
     }
 }
@@ -180,17 +195,23 @@ impl TryFrom<&Exp<String>> for MovSrc {
                         Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
                     }
                 }
-                "vector_subrange" => {
-                    let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                    let from = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
-                    let len = bv_from_exp(get_arg(f, args, 2)?)?.lower_u64() as u32;
-                    Ok(mov_src.map(|bv| bv.slice(from, len).unwrap()))
+                "page" => {
+                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
+                        Ok(MovSrc::Page(var.to_owned()))
+                    } else {
+                        Err(Error::GetFunctionArg("page:arg0 was not parsed correctly".to_owned()))
+                    }
                 }
-                "page" | "offset" => Err(Error::Unsupported(format!("function {f} not supported"))),
-                // "page" => {
+                // "vector_subrange" => {
                 //     let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
-                //     Ok(mov_src.map(|bv| bv.slice(12, 36).unwrap()))
+                //     let from = bv_from_exp(get_arg(f, args, 1)?)?.lower_u64() as u32;
+                //     let len = bv_from_exp(get_arg(f, args, 2)?)?.lower_u64() as u32;
+                //     Ok(mov_src.map(|bv| bv.slice(from, len).unwrap()))
                 // }
+                "pte1" | "pte2" | "desc1" | "desc2" | "mkdesc1" | "mkdesc2" => {
+                    Err(Error::Unsupported(format!("function {f} not supported")))
+                }
+                // "page" | "offset" => Err(Error::Unimpl
                 // TODO: offset()
                 f => Err(Error::UnimplementedFunction(f.to_owned())),
             },
@@ -208,6 +229,7 @@ impl fmt::Display for MovSrc {
             Self::Reg(reg) => write!(f, "{reg}"),
             Self::Pte(reg) => write!(f, "pte({reg})"),
             Self::Desc(reg) => write!(f, "desc({reg})"),
+            Self::Page(reg) => write!(f, "page({reg})"),
         }
     }
 }
@@ -226,6 +248,7 @@ impl Reg {
 
             PState(_) => unimplemented!("Converting PSTATE regs to asm is not implemented properly yet."),
             VBar(_) => unimplemented!("Converting PSTATE regs to asm is not implemented properly yet."),
+            Isla(_) => unimplemented!("Converting isla-specific registers to asm is not possible."),
         }
     }
 
@@ -238,6 +261,16 @@ impl Reg {
             Self::X(n) => format!("outp{thread_no}r{n}"),
             _ => unimplemented!("output reg name generation not implemented for non \"X\" registers."),
         }
+    }
+
+    pub fn first_unused_gp(regs: &BTreeSet<Self>) -> Option<Self> {
+        for i in (0..31).rev() {
+            let x = Self::X(i);
+            if !regs.contains(&x) {
+                return Some(x);
+            }
+        }
+        None
     }
 }
 
@@ -271,6 +304,11 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
         return Ok(Reg::VBar(asm.to_owned()));
     }
 
+    if asm.starts_with("__isla") {
+        log::info!("found isla-specific register {asm}");
+        return Ok(Reg::Isla(asm.to_owned()));
+    }
+
     let (t, idx) = asm.split_at(1);
     let idx: u8 = idx.parse().map_err(|e: std::num::ParseIntError| Error::ParseReg(e.to_string()))?;
     match t {
@@ -287,6 +325,7 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
     }
 }
 
+// TODO: generate unmapped vars if no other constraints
 pub fn gen_init_state(page_table_setup: &[page_table::setup::Constraint]) -> Vec<InitState> {
     use page_table::setup::{Constraint, Exp, TableConstraint};
     page_table_setup
@@ -302,7 +341,11 @@ pub fn gen_init_state(page_table_setup: &[page_table::setup::Constraint]) -> Vec
                 val.map(|v| InitState::Var(id.clone(), v))
             }
             Constraint::Table(TableConstraint::MapsTo(Exp::Id(from), Exp::Id(to), _, _lvl, _)) => {
-                Some(InitState::Alias(from.clone(), to.clone()))
+                if to.as_str() == "invalid" {
+                    Some(InitState::Unmapped(from.clone()))
+                } else {
+                    Some(InitState::Alias(from.clone(), to.clone()))
+                }
             }
             _ => None,
         })
