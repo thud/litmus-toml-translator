@@ -15,6 +15,25 @@ use crate::arch;
 use crate::error::{Error, Result};
 use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread, ThreadSyncHandler};
 
+#[derive(Debug, Default)]
+pub struct TranslationResults {
+    pub succeeded: usize,
+    pub unsupported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+impl TranslationResults {
+    pub fn total(&self) -> usize {
+        self.succeeded + self.skipped + self.failed
+    }
+
+    pub fn percentage_succeeded(&self) -> f64 {
+        let f = self.succeeded as f64 / self.total() as f64;
+        (f * 1000.).round() / 10.
+    }
+}
+
 fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
     let parsed = &axiomatic_litmus::parse_reset_value(unparsed_val, symtab)
         .map_err(|e| Error::ParseResetValue(e.to_string()))?;

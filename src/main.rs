@@ -45,7 +45,7 @@ fn is_toml(p: &Path) -> bool {
     p.extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
 }
 
-fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Result<()> {
+fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, results: &mut parse::TranslationResults) -> error::Result<()> {
     if file_or_dir.is_dir() {
         let dir = file_or_dir;
         let files = std::fs::read_dir(dir)
@@ -54,7 +54,7 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Resul
             .filter(|entry| entry.is_dir() || is_toml(entry));
         for input in files {
             log::info!("dir:{dir:?} input:{input:?}");
-            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force).unwrap();
+            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force, results).unwrap();
         }
     } else {
         let file = file_or_dir;
@@ -66,6 +66,7 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Resul
         let output_path = out_dir.with_file_name(file_name);
         if output_path.exists() && !force {
             log::warn!("file {output_path:?} exists. skipping...");
+            results.skipped += 1;
             eprintln!(
                 "{} {} ({} exists)",
                 "Skipping".yellow().bold(),
@@ -83,6 +84,7 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Resul
                     log::info!("writing process_toml({file:?}) to {output_path:?}");
                     write!(f, "{output_code}").unwrap();
                     log::info!("successfully translated {file:?} -> {output_path:?}");
+                    results.succeeded += 1;
                     eprintln!(
                         "{} {} -> {}",
                         "Success".green().bold(),
@@ -92,10 +94,12 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool) -> error::Resul
                 }
                 Err(error::Error::Unsupported(e)) => {
                     log::error!("unsupported test {output_path:?} {e}");
+                    results.unsupported += 1;
                     eprintln!("{} {}", "Unsupported".blue().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
                 Err(e) => {
                     log::error!("error translating test {output_path:?} {e}");
+                    results.failed += 1;
                     eprintln!("{} translating {}", "Error".red().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
             }
@@ -115,6 +119,17 @@ fn init_logger(verbosity: u8) {
     pretty_env_logger::formatted_builder().filter_level(filter_level).init();
 }
 
+fn log_results(results: parse::TranslationResults) {
+    eprintln!(
+        "[{} succeeded ({}%), {} unsupported, {} skipped, {} failed]",
+        results.succeeded.to_string().green(),
+        results.percentage_succeeded().to_string().green(),
+        results.unsupported.to_string().blue(),
+        results.skipped.to_string().yellow(),
+        results.failed.to_string().red(),
+    );
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -127,12 +142,14 @@ fn main() {
         }
     }
 
+    let mut results = parse::TranslationResults::default();
+
     match cli.input {
         Some(paths) => {
             if paths.len() == 1 {
                 let path = &paths[0]; //.canonicalize().unwrap();
                 if let Some(out) = &cli.output {
-                    process_path(path, out, cli.force).unwrap();
+                    process_path(path, out, cli.force, &mut results).unwrap();
                 } else if path.is_file() {
                     // print to stdout
                     let toml = std::fs::read_to_string(path).unwrap();
@@ -142,15 +159,15 @@ fn main() {
                     };
                 } else {
                     // let parent = PathBuf::from(path.parent().unwrap());
-                    process_path(path, path, cli.force).unwrap();
+                    process_path(path, path, cli.force, &mut results).unwrap();
                 }
             } else {
                 for path in paths {
                     if let Some(out) = &cli.output {
-                        process_path(&path, &out.join(path.file_name().unwrap()), cli.force).unwrap();
+                        process_path(&path, &out.join(path.file_name().unwrap()), cli.force, &mut results).unwrap();
                     } else {
                         let parent = PathBuf::from(path.parent().unwrap());
-                        process_path(&path, &parent, cli.force).unwrap();
+                        process_path(&path, &parent, cli.force, &mut results).unwrap();
                     }
                 }
             }
@@ -173,4 +190,6 @@ fn main() {
             }
         }
     }
+
+    log_results(results);
 }
