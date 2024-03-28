@@ -28,6 +28,8 @@ pub enum Error {
     ParseExp(String),
     #[error("parsing bits from string failed: {0}")]
     ParseBitsFromString(ParseIntError),
+    #[error("parsing eret from sync handler: {0}")]
+    ParseSyncHandlerEret(String),
     #[error("unimplemented function: {0}")]
     UnimplementedFunction(String),
     #[error("unable to match handler to a thread and EL: {0}")]

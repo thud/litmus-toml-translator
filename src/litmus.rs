@@ -33,9 +33,7 @@ pub struct Thread {
     pub code: String,
     pub el: u8,
     pub regs_clobber: Vec<Reg>,
-    pub eret_reg: Reg,
     pub vbar_el1: Option<B64>,
-    pub vbar_el2: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
 }
 
@@ -43,8 +41,8 @@ pub struct Thread {
 pub struct ThreadSyncHandler {
     pub name: String,
     pub code: String,
-    pub thread: usize,
-    pub el: u8,
+    pub eret_reg: Option<Reg>,
+    pub threads_els: Vec<(usize, u8)>, // (thread_no, el)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +51,8 @@ pub enum MovSrc {
     Bin(B64),
     Hex(B64),
     Reg(String),
-    Pte(String),
-    Desc(String),
+    Pte(String, u8),
+    Desc(String, u8),
     Page(String),
 }
 
@@ -90,14 +88,14 @@ impl MovSrc {
             Self::Nat(bv) => Self::Nat(f(*bv)),
             Self::Bin(bv) => Self::Bin(f(*bv)),
             Self::Hex(bv) => Self::Hex(f(*bv)),
-            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) | Self::Page(_) => panic!(),
+            Self::Reg(_) | Self::Pte(..) | Self::Desc(..) | Self::Page(_) => panic!(),
         }
     }
 
     pub fn bits(&self) -> &B64 {
         match self {
             Self::Nat(bv) | Self::Bin(bv) | Self::Hex(bv) => bv,
-            Self::Reg(_) | Self::Pte(_) | Self::Desc(_) | Self::Page(_) => panic!(),
+            Self::Reg(_) | Self::Pte(..) | Self::Desc(..) | Self::Page(_) => panic!(),
         }
     }
 
@@ -107,9 +105,16 @@ impl MovSrc {
             Self::Bin(n) => format!("#0b{:b}", n.lower_u64()),
             Self::Hex(n) => format!("#0x{:x}", n.lower_u64()),
             Self::Reg(reg) => format!("%[{reg}]"),
-            Self::Pte(sym) => format!("%[{sym}pte]"),
-            Self::Desc(sym) => format!("%[{sym}desc]"),
             Self::Page(sym) => format!("%[{sym}page]"),
+            Self::Pte(sym, 3) => format!("%[{sym}pte]"),
+            Self::Pte(sym, 2) => format!("%[{sym}pmd]"),
+            Self::Pte(sym, 1) => format!("%[{sym}pud]"),
+            Self::Desc(sym, 3) => format!("%[{sym}desc]"),
+            Self::Desc(sym, 2) => format!("%[{sym}pmddesc]"),
+            Self::Desc(sym, 1) => format!("%[{sym}puddesc]"),
+
+            Self::Pte(_, _) => unimplemented!(),
+            Self::Desc(_, _) => unimplemented!(),
         }
     }
 }
@@ -135,6 +140,10 @@ impl TryFrom<&Exp<String>> for MovSrc {
             args.get(idx).ok_or_else(|| Error::GetFunctionArg(format!("{fun}:arg{idx}")))
         }
 
+        fn get_kwarg<'a>(fun: &str, kw_args: &'a HashMap<String, Exp<String>>, kw: &str) -> Result<&'a Exp<String>> {
+            kw_args.get(kw).ok_or_else(|| Error::GetFunctionArg(format!("{fun}:arg_{kw}")))
+        }
+
         log::info!("parsing {exp:?}");
         match exp {
             Exp::Nat(n) => Ok(Self::Nat(B64::new(*n, 64))),
@@ -149,7 +158,7 @@ impl TryFrom<&Exp<String>> for MovSrc {
             Exp::Bits64(bits, _len) => Ok(Self::Bin(B64::new(*bits, 64))),
             Exp::Loc(var) => Ok(Self::Reg(var.clone())),
 
-            Exp::App(f, args, _kwargs) => match f.as_ref() {
+            Exp::App(f, args, kw_args) => match f.as_ref() {
                 "extz" => get_arg(f, args, 0)?.try_into(),
                 "exts" => {
                     let mov_src: MovSrc = get_arg(f, args, 0)?.try_into()?;
@@ -181,25 +190,56 @@ impl TryFrom<&Exp<String>> for MovSrc {
                     let shift_by = bv_from_exp(&get_arg(f, args, 1)?.clone())?;
                     Ok(mov_src.map(|bv1| bv1 << shift_by))
                 }
-                "pte3" => {
-                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
-                        Ok(MovSrc::Pte(var.clone()))
-                    } else {
-                        Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
-                    }
-                }
-                "desc3" => {
-                    if let Exp::Loc(var) = get_arg(f, args, 0)? {
-                        Ok(MovSrc::Desc(var.to_owned()))
-                    } else {
-                        Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
-                    }
-                }
                 "page" => {
                     if let Exp::Loc(var) = get_arg(f, args, 0)? {
                         Ok(MovSrc::Page(var.to_owned()))
                     } else {
                         Err(Error::GetFunctionArg("page:arg0 was not parsed correctly".to_owned()))
+                    }
+                }
+                pte if pte.starts_with("pte") => {
+                    let lvl = pte.strip_prefix("pte")
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| Error::UnimplementedFunction(pte.to_owned()))?;
+                    if lvl > 0 && lvl <= 3 {
+                        if let Exp::Loc(var) = get_arg(f, args, 0)? {
+                            Ok(MovSrc::Pte(var.clone(), lvl))
+                        } else {
+                            Err(Error::GetFunctionArg("pte3:arg0 was not parsed correctly".to_owned()))
+                        }
+                    } else {
+                        Err(Error::UnimplementedFunction(format!("pte [lvl = {lvl}] function not supported")))
+                    }
+                }
+                desc if desc.starts_with("desc") => {
+                    let lvl = desc.strip_prefix("desc")
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| Error::UnimplementedFunction(desc.to_owned()))?;
+                    if lvl > 0 && lvl <= 3 {
+                        if let Exp::Loc(var) = get_arg(f, args, 0)? {
+                            Ok(MovSrc::Desc(var.to_owned(), lvl))
+                        } else {
+                            Err(Error::GetFunctionArg("desc:arg0 was not parsed correctly".to_owned()))
+                        }
+                    } else {
+                        Err(Error::UnimplementedFunction(format!("desc [lvl = {lvl}] function not supported")))
+                    }
+                }
+                mkdesc if mkdesc.starts_with("mkdesc") => {
+                    let lvl = mkdesc.strip_prefix("mkdesc")
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| Error::UnimplementedFunction(mkdesc.to_owned()))?;
+                    if lvl > 0 && lvl <= 3 {
+                        if let Exp::Loc(oa) = get_kwarg(f, kw_args, "oa")? {
+                            Ok(MovSrc::Desc(oa.to_owned(), lvl))
+                        } else {
+                            Err(Error::GetFunctionArg("mkdesc:arg_oa was not parsed correctly".to_owned()))
+                        }
+                    } else {
+                        Err(Error::UnimplementedFunction(format!("mkdesc [lvl = {lvl}] function not supported")))
                     }
                 }
                 // "vector_subrange" => {
@@ -208,9 +248,9 @@ impl TryFrom<&Exp<String>> for MovSrc {
                 //     let len = bv_from_exp(get_arg(f, args, 2)?)?.lower_u64() as u32;
                 //     Ok(mov_src.map(|bv| bv.slice(from, len).unwrap()))
                 // }
-                "pte1" | "pte2" | "desc1" | "desc2" | "mkdesc1" | "mkdesc2" => {
-                    Err(Error::Unsupported(format!("function {f} not supported")))
-                }
+                // "pte1" | "pte2" | "desc1" | "desc2" | "mkdesc1" | "mkdesc2" => {
+                //     Err(Error::Unsupported(format!("function {f} not supported")))
+                // }
                 // "page" | "offset" => Err(Error::Unimpl
                 // TODO: offset()
                 f => Err(Error::UnimplementedFunction(f.to_owned())),
@@ -227,8 +267,8 @@ impl fmt::Display for MovSrc {
             Self::Bin(n) => write!(f, "0b{:b}", n.lower_u64()),
             Self::Hex(n) => write!(f, "0x{:x}", n.lower_u64()),
             Self::Reg(reg) => write!(f, "{reg}"),
-            Self::Pte(reg) => write!(f, "pte({reg})"),
-            Self::Desc(reg) => write!(f, "desc({reg})"),
+            Self::Pte(reg, lvl) => write!(f, "pte{lvl}({reg})"),
+            Self::Desc(reg, lvl) => write!(f, "desc{lvl}({reg})"),
             Self::Page(reg) => write!(f, "page({reg})"),
         }
     }
@@ -261,16 +301,6 @@ impl Reg {
             Self::X(n) => format!("outp{thread_no}r{n}"),
             _ => unimplemented!("output reg name generation not implemented for non \"X\" registers."),
         }
-    }
-
-    pub fn first_unused_gp(regs: &BTreeSet<Self>) -> Option<Self> {
-        for i in (0..31).rev() {
-            let x = Self::X(i);
-            if !regs.contains(&x) {
-                return Some(x);
-            }
-        }
-        None
     }
 }
 
@@ -309,8 +339,14 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
         return Ok(Reg::Isla(asm.to_owned()));
     }
 
+    if asm.starts_with("ELR_EL") || asm.starts_with("SPSR_EL") || asm.starts_with("TTBR") {
+        return Err(
+            Error::Unsupported(format!("litmus-toml-translator does not support special registers like {asm} in thread resets."))
+        );
+    }
+
     let (t, idx) = asm.split_at(1);
-    let idx: u8 = idx.parse().map_err(|e: std::num::ParseIntError| Error::ParseReg(e.to_string()))?;
+    let idx: u8 = idx.parse().map_err(|e: std::num::ParseIntError| Error::ParseReg(format!("{e} ({asm})")))?;
     match t {
         "x" | "X" => Ok(X(idx)),
         "w" | "W" => Ok(W(idx)),
@@ -321,7 +357,7 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
         "q" | "Q" => Ok(Q(idx)),
 
         "r" | "R" => Ok(X(idx)), // TODO: this should use register renames
-        t => Err(Error::ParseReg(t.to_string())),
+        t => Err(Error::ParseReg(format!("{t} ({asm})"))),
     }
 }
 

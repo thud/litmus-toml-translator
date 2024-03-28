@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use once_cell::sync::Lazy;
+use regex::Regex;
 
 use isla_axiomatic::litmus::exp::{Exp, Loc};
 use isla_axiomatic::litmus::{self as axiomatic_litmus, exp_lexer, exp_parser};
@@ -25,7 +26,7 @@ pub struct TranslationResults {
 
 impl TranslationResults {
     pub fn total(&self) -> usize {
-        self.succeeded + self.skipped + self.failed
+        self.succeeded + self.unsupported + self.skipped + self.failed
     }
 
     pub fn percentage_succeeded(&self) -> f64 {
@@ -48,7 +49,14 @@ fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<Hash
             .ok_or_else(|| "Thread init/reset must be a list of register name/value pairs".to_string())
             .map_err(Error::ParseResetValue)?
             .into_iter()
-            .map(|(reg, val)| Ok((litmus::parse_reg_from_str(reg)?, parse_reset_val(val, symtab)?)))
+            .map(|(reg, val)| {
+                let reg = litmus::parse_reg_from_str(reg)?;
+                match reg {
+                    // Isla-specific values can be more difficult to parse. We dump into a Reg type for now.
+                    Reg::Isla(..) => Ok((reg, MovSrc::Reg(val.to_string()))),
+                    _ => Ok((reg, parse_reset_val(val, symtab)?))
+                }
+            })
             .collect()
     } else {
         Ok(HashMap::new())
@@ -95,8 +103,6 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         },
     }?;
 
-    let eret_reg = Reg::first_unused_gp(&regs_clobber).unwrap();
-
     let inits = parse_resets(thread.get("init"), symtab)?;
     let resets = parse_resets(thread.get("reset"), symtab)?;
     let (merged_resets, special_resets) = merge_inits_resets(inits, resets)?;
@@ -108,7 +114,7 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
             return Err(Error::ParseThread(format!("Invalid EL level ({r})")));
         }
 
-        let el_u8 = el_src.map(|mov_src| mov_src.bits().lower_u8()).unwrap_or(B64::new(1, 64).lower_u8()); // By default EL = 0
+        let el_u8 = el_src.map(|mov_src| mov_src.bits().lower_u8()).unwrap_or(B64::new(0, 64).lower_u8()); // By default EL = 0
 
         if el_u8 > 1 {
             log::warn!("EL > 1 not allowed");
@@ -117,7 +123,11 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
     };
 
     let vbar_el1 = special_resets.get(&Reg::VBar("VBAR_EL1".to_owned())).map(MovSrc::bits).copied();
-    let vbar_el2 = special_resets.get(&Reg::VBar("VBAR_EL2".to_owned())).map(MovSrc::bits).copied();
+
+    // Harness doesn't support EL2.
+    if special_resets.contains_key(&Reg::VBar("VBAR_EL2".to_owned())) {
+        return Err(Error::Unsupported(format!("Harness does not support handling of EL2 exceptions.")));
+    }
 
     Ok(Thread {
         name: thread_name.to_owned(),
@@ -126,8 +136,6 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         reset: merged_resets.into_iter().map(|(reg, val)| (reg, val.to_owned())).collect(),
         regs_clobber: regs_clobber.into_iter().collect(),
         vbar_el1,
-        vbar_el2,
-        eret_reg,
     })
 }
 
@@ -141,43 +149,50 @@ fn parse_thread_sync_handler_from_section(
         let address = parse_reset_val(address, symtab)?; // TODO: this is probably the wrong
                                                          // parsing fn to use.
         let address = address.bits();
-        fn address_is_relevant(address: B64, vbar: B64) -> bool {
-            let twelve = B64::new(12, 12); // TODO: this is inefficient
-            address >> twelve == vbar >> twelve
+        fn el_from_vec_offset(address: B64, vbar: B64) -> Option<u8> {
+            let offset = (address - vbar).lower_u64();
+            if offset == 0 || offset == 0x200 {
+                Some(1)
+            } else if offset == 0x400 || offset == 0x600 {
+                Some(0)
+            } else {
+                None
+            }
         }
         let threads_els = threads
             .iter()
-            .filter_map(|t| match (t.vbar_el1, t.vbar_el2) {
-                (Some(vbar_el1), _) if address_is_relevant(*address, vbar_el1) => Some((t.name.parse().unwrap(), 1)),
-                (_, Some(vbar_el2)) if address_is_relevant(*address, vbar_el2) => Some((t.name.parse().unwrap(), 2)),
-                _ => None,
+            .filter_map(|t| {
+                t.vbar_el1
+                    .and_then(|vbar| el_from_vec_offset(*address, vbar))
+                    .map(|el| (t.name.parse().unwrap(), el))
             })
             .collect::<Vec<_>>();
 
-        let (thread, el) = match threads_els.len() {
-            1 if matches!(threads_els[0], (_, 0) | (_, 1)) => Ok(threads_els[0]),
-            2 => Err(Error::Unsupported("EL2 tests are not supported by system-litmus-harness".to_owned())),
-            0 => Err(Error::UnmatchedHandler(format!("{handler_name} at {address}"))),
-            n => Err(Error::UnmatchedHandler(format!("found {n} possible threads for handler {handler_name}"))),
-        }?;
+        if threads_els.iter().any(|(_, el)| *el != 0 && *el != 1) {
+            return Err(Error::Unsupported(format!("unsupported exception level")));
+        }
 
         let code = handler
             .get("code")
             .ok_or_else(|| Error::ParseThread(format!("No code or call found for thread {}", handler_name)))
             .map(|code| code.as_str())
-            .and_then(|code| code.ok_or_else(|| Error::ParseThread("thread code must be a string".to_string())))
-            .map(|code| {
-                // Replace ERET if present with harness' ERET_TO_NEXT
-                let mut rev_lines = code.trim().split('\n').rev();
-                while let Some(line) = rev_lines.next() {
-                    if line.trim().starts_with("ERET") {
-                        return rev_lines.rev().collect::<Vec<_>>().join("\n");
-                    }
-                }
-                code.to_owned()
-            })?;
+            .and_then(|code| code.ok_or_else(|| Error::ParseThread("thread code must be a string".to_string())))?;
 
-        Ok(Some(ThreadSyncHandler { name: handler_name.to_owned(), code: code.to_owned(), el, thread }))
+        let eret_reg = {
+            static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:MSR|msr)\s+ELR_EL[012]\s*,\s*([xXwW][0-9]+)").unwrap());
+            if let Some(cap) = &RE.captures(code) {
+                Some(litmus::parse_reg_from_str(&cap[1])
+                    .map_err(|e| {
+                        log::error!("Not handling eret correctly for this test");
+                        e
+                    })?)
+            // .ok_or_else(|| Error::ParseSyncHandlerEret(handler_name.to_owned()))?;
+            } else {
+                None
+            }
+        };
+
+        Ok(Some(ThreadSyncHandler { name: handler_name.to_owned(), code: code.to_owned(), eret_reg, threads_els }))
     } else {
         // Can't be a functioning thread sync handler.
         Ok(None)
@@ -206,7 +221,7 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
             }
             // TODO: Currently ignoring function application
             exp => {
-                Err(Error::ParseFinalAssertion(format!("Can't yet use final assertions with complex terms {exp:?}")))
+                Err(Error::Unsupported(format!("Can't yet use final assertions with complex terms {exp:?}")))
             }
             // Exp::Loc(A),
             // Exp::Label(String),
@@ -238,7 +253,6 @@ fn get_additional_vars_from_pts(
             }
             Table(MapsTo(Exp::Id(from), Exp::Id(to), _, lvl, _)) => {
                 if *lvl != 3 {
-                    eprintln!("--lvl!=3--");
                     return Err(Error::Unsupported("intermediate addresses are not supported".to_owned()));
                 }
                 all_vars.insert(from.clone());
@@ -303,18 +317,31 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         if let Some(litmus_setup) = setup.as_str() {
             let setup = format!("{}{}", isa.default_page_table_setup, litmus_setup);
             let lexer = page_table::setup_lexer::SetupLexer::new(&setup);
-            (
-                page_table::setup_parser::SetupParser::new()
-                    .parse(&isa, lexer)
-                    .map_err(|error| {
-                        axiomatic_litmus::format_error_page_table_setup(
-                            litmus_setup,
-                            error.map_location(|pos| pos - isa.default_page_table_setup.len()),
-                        )
-                    })
-                    .map_err(Error::PageTableSetup)?,
-                litmus_setup.to_string(),
-            )
+            let page_table_setup = page_table::setup_parser::SetupParser::new()
+                .parse(&isa, lexer)
+                .map_err(|error| {
+                    axiomatic_litmus::format_error_page_table_setup(
+                        litmus_setup,
+                        error.map_location(|pos| pos - isa.default_page_table_setup.len()),
+                    )
+                })
+                .map_err(Error::PageTableSetup)?;
+            let custom_tables = page_table_setup
+                .iter()
+                .any(|c| {
+                    if let isla_axiomatic::page_table::setup::Constraint::Option(op, val) = c {
+                        match (op.as_str(), val) {
+                            ("default_tables", false) => true,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                });
+            if custom_tables {
+                return Err(Error::Unsupported("litmus-toml-translator doesn't support custom tables".to_owned()));
+            }
+            (page_table_setup, litmus_setup.to_string())
         } else {
             return Err(Error::PageTableSetup("page_table_setup must be a string".to_string()));
         }

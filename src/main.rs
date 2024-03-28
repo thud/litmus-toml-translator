@@ -6,6 +6,7 @@ mod parse;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 use clap::{CommandFactory, Parser};
 use colored::*;
@@ -32,6 +33,10 @@ struct Cli {
     output: Option<PathBuf>,
     #[arg(short, long, help = "allow overwriting files with output")]
     force: bool,
+    #[arg(short = 'F', long, help = "flatten output tests into single output dir")]
+    flatten: bool,
+    #[arg(short = 'x', long, help = "specify text file with names of tests to ignore")]
+    ignore_list: Option<PathBuf>,
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 }
@@ -45,8 +50,16 @@ fn is_toml(p: &Path) -> bool {
     p.extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
 }
 
-fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, results: &mut parse::TranslationResults) -> error::Result<()> {
-    if file_or_dir.is_dir() {
+fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, flatten_to: &Option<PathBuf>, ignore: &HashSet<String>, results: &mut parse::TranslationResults) -> error::Result<()> {
+    if ignore.contains(file_or_dir.file_name().unwrap().to_str().unwrap()) {
+        log::warn!("file {file_or_dir:?} exists. skipping...");
+        results.skipped += 1;
+        eprintln!(
+            "{} {} (in ignore list)",
+            "Skipping".yellow().bold(),
+            file_or_dir.as_os_str().to_string_lossy().bold(),
+        );
+    } else if file_or_dir.is_dir() {
         let dir = file_or_dir;
         let files = std::fs::read_dir(dir)
             .unwrap()
@@ -54,7 +67,7 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, results: &mut p
             .filter(|entry| entry.is_dir() || is_toml(entry));
         for input in files {
             log::info!("dir:{dir:?} input:{input:?}");
-            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force, results).unwrap();
+            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force, flatten_to, ignore, results).unwrap();
         }
     } else {
         let file = file_or_dir;
@@ -63,6 +76,7 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, results: &mut p
             return Ok(());
         }
         let file_name = file.file_name().unwrap().to_string_lossy().into_owned() + ".c";
+        let out_dir = flatten_to.as_deref().unwrap_or(out_dir);
         let output_path = out_dir.with_file_name(file_name);
         if output_path.exists() && !force {
             log::warn!("file {output_path:?} exists. skipping...");
@@ -93,12 +107,12 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, results: &mut p
                     );
                 }
                 Err(error::Error::Unsupported(e)) => {
-                    log::error!("unsupported test {output_path:?} {e}");
+                    log::error!("unsupported test {file:?} {e}");
                     results.unsupported += 1;
                     eprintln!("{} {}", "Unsupported".blue().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
                 Err(e) => {
-                    log::error!("error translating test {output_path:?} {e}");
+                    log::error!("error translating test {file:?} {e}");
                     results.failed += 1;
                     eprintln!("{} translating {}", "Error".red().bold(), file.as_os_str().to_string_lossy().bold(),);
                 }
@@ -142,6 +156,27 @@ fn main() {
         }
     }
 
+    if cli.flatten && cli.output.is_none() {
+        log::error!("can only flatten output if output directory specified (-o). aborting...");
+        std::process::exit(1);
+    }
+
+    let flatten_to = if cli.flatten {
+        Some(cli.output.clone().unwrap().join(PathBuf::from("_")))
+    } else {
+        None
+    };
+
+    let ignore = if let Some(ignore_list) = cli.ignore_list {
+        let list: String = std::fs::read_to_string(ignore_list).unwrap().to_owned();
+        list
+            .split('\n')
+            .map(|ln| ln.split_once('#').map(|(fname, _comment)| fname).unwrap_or(ln).trim().to_owned())
+            .collect::<HashSet<String>>()
+    } else {
+        HashSet::new()
+    };
+
     let mut results = parse::TranslationResults::default();
 
     match cli.input {
@@ -149,25 +184,29 @@ fn main() {
             if paths.len() == 1 {
                 let path = &paths[0]; //.canonicalize().unwrap();
                 if let Some(out) = &cli.output {
-                    process_path(path, out, cli.force, &mut results).unwrap();
+                    process_path(path, out, cli.force, &flatten_to, &ignore, &mut results).unwrap();
                 } else if path.is_file() {
-                    // print to stdout
-                    let toml = std::fs::read_to_string(path).unwrap();
-                    match process_toml(toml) {
-                        Ok(output_code) => println!("{output_code}"),
-                        Err(e) => log::error!("failed to translate toml from stdin {e}"),
-                    };
+                    if ignore.contains(path.file_name().unwrap().to_str().unwrap()) {
+                        log::warn!("skipping file as it's present in ignore list");
+                    } else {
+                        // print to stdout
+                        let toml = std::fs::read_to_string(path).unwrap();
+                        match process_toml(toml) {
+                            Ok(output_code) => println!("{output_code}"),
+                            Err(e) => log::error!("failed to translate toml from stdin {e}"),
+                        };
+                    }
                 } else {
                     // let parent = PathBuf::from(path.parent().unwrap());
-                    process_path(path, path, cli.force, &mut results).unwrap();
+                    process_path(path, path, cli.force, &flatten_to, &ignore, &mut results).unwrap();
                 }
             } else {
                 for path in paths {
                     if let Some(out) = &cli.output {
-                        process_path(&path, &out.join(path.file_name().unwrap()), cli.force, &mut results).unwrap();
+                        process_path(&path, &out.join(path.file_name().unwrap()), cli.force, &flatten_to, &ignore, &mut results).unwrap();
                     } else {
                         let parent = PathBuf::from(path.parent().unwrap());
-                        process_path(&path, &parent, cli.force, &mut results).unwrap();
+                        process_path(&path, &parent, cli.force, &flatten_to, &ignore, &mut results).unwrap();
                     }
                 }
             }
