@@ -198,7 +198,8 @@ impl TryFrom<&Exp<String>> for MovSrc {
                     }
                 }
                 pte if pte.starts_with("pte") => {
-                    let lvl = pte.strip_prefix("pte")
+                    let lvl = pte
+                        .strip_prefix("pte")
                         .unwrap()
                         .parse()
                         .map_err(|_| Error::UnimplementedFunction(pte.to_owned()))?;
@@ -213,7 +214,8 @@ impl TryFrom<&Exp<String>> for MovSrc {
                     }
                 }
                 desc if desc.starts_with("desc") => {
-                    let lvl = desc.strip_prefix("desc")
+                    let lvl = desc
+                        .strip_prefix("desc")
                         .unwrap()
                         .parse()
                         .map_err(|_| Error::UnimplementedFunction(desc.to_owned()))?;
@@ -228,7 +230,8 @@ impl TryFrom<&Exp<String>> for MovSrc {
                     }
                 }
                 mkdesc if mkdesc.starts_with("mkdesc") => {
-                    let lvl = mkdesc.strip_prefix("mkdesc")
+                    let lvl = mkdesc
+                        .strip_prefix("mkdesc")
                         .unwrap()
                         .parse()
                         .map_err(|_| Error::UnimplementedFunction(mkdesc.to_owned()))?;
@@ -340,9 +343,9 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
     }
 
     if asm.starts_with("ELR_EL") || asm.starts_with("SPSR_EL") || asm.starts_with("TTBR") {
-        return Err(
-            Error::Unsupported(format!("litmus-toml-translator does not support special registers like {asm} in thread resets."))
-        );
+        return Err(Error::Unsupported(format!(
+            "litmus-toml-translator does not support special registers like {asm} in thread resets."
+        )));
     }
 
     let (t, idx) = asm.split_at(1);

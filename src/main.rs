@@ -4,9 +4,9 @@ mod litmus;
 mod output;
 mod parse;
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 
 use clap::{CommandFactory, Parser};
 use colored::*;
@@ -50,7 +50,14 @@ fn is_toml(p: &Path) -> bool {
     p.extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
 }
 
-fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, flatten_to: &Option<PathBuf>, ignore: &HashSet<String>, results: &mut parse::TranslationResults) -> error::Result<()> {
+fn process_path(
+    file_or_dir: &Path,
+    out_dir: &Path,
+    force: bool,
+    flatten_to: &Option<PathBuf>,
+    ignore: &HashSet<String>,
+    results: &mut parse::TranslationResults,
+) -> error::Result<()> {
     if ignore.contains(file_or_dir.file_name().unwrap().to_str().unwrap()) {
         log::warn!("file {file_or_dir:?} exists. skipping...");
         results.skipped += 1;
@@ -67,7 +74,15 @@ fn process_path(file_or_dir: &Path, out_dir: &Path, force: bool, flatten_to: &Op
             .filter(|entry| entry.is_dir() || is_toml(entry));
         for input in files {
             log::info!("dir:{dir:?} input:{input:?}");
-            process_path(&input, &out_dir.join(PathBuf::from(input.file_name().unwrap())), force, flatten_to, ignore, results).unwrap();
+            process_path(
+                &input,
+                &out_dir.join(PathBuf::from(input.file_name().unwrap())),
+                force,
+                flatten_to,
+                ignore,
+                results,
+            )
+            .unwrap();
         }
     } else {
         let file = file_or_dir;
@@ -161,16 +176,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let flatten_to = if cli.flatten {
-        Some(cli.output.clone().unwrap().join(PathBuf::from("_")))
-    } else {
-        None
-    };
+    let flatten_to = if cli.flatten { Some(cli.output.clone().unwrap().join(PathBuf::from("_"))) } else { None };
 
     let ignore = if let Some(ignore_list) = cli.ignore_list {
         let list: String = std::fs::read_to_string(ignore_list).unwrap().to_owned();
-        list
-            .split('\n')
+        list.split('\n')
             .map(|ln| ln.split_once('#').map(|(fname, _comment)| fname).unwrap_or(ln).trim().to_owned())
             .collect::<HashSet<String>>()
     } else {
@@ -203,7 +213,15 @@ fn main() {
             } else {
                 for path in paths {
                     if let Some(out) = &cli.output {
-                        process_path(&path, &out.join(path.file_name().unwrap()), cli.force, &flatten_to, &ignore, &mut results).unwrap();
+                        process_path(
+                            &path,
+                            &out.join(path.file_name().unwrap()),
+                            cli.force,
+                            &flatten_to,
+                            &ignore,
+                            &mut results,
+                        )
+                        .unwrap();
                     } else {
                         let parent = PathBuf::from(path.parent().unwrap());
                         process_path(&path, &parent, cli.force, &flatten_to, &ignore, &mut results).unwrap();

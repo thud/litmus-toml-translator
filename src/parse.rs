@@ -54,7 +54,7 @@ fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<Hash
                 match reg {
                     // Isla-specific values can be more difficult to parse. We dump into a Reg type for now.
                     Reg::Isla(..) => Ok((reg, MovSrc::Reg(val.to_string()))),
-                    _ => Ok((reg, parse_reset_val(val, symtab)?))
+                    _ => Ok((reg, parse_reset_val(val, symtab)?)),
                 }
             })
             .collect()
@@ -126,7 +126,7 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
 
     // Harness doesn't support EL2.
     if special_resets.contains_key(&Reg::VBar("VBAR_EL2".to_owned())) {
-        return Err(Error::Unsupported(format!("Harness does not support handling of EL2 exceptions.")));
+        return Err(Error::Unsupported("Harness does not support handling of EL2 exceptions.".to_owned()));
     }
 
     Ok(Thread {
@@ -162,14 +162,12 @@ fn parse_thread_sync_handler_from_section(
         let threads_els = threads
             .iter()
             .filter_map(|t| {
-                t.vbar_el1
-                    .and_then(|vbar| el_from_vec_offset(*address, vbar))
-                    .map(|el| (t.name.parse().unwrap(), el))
+                t.vbar_el1.and_then(|vbar| el_from_vec_offset(*address, vbar)).map(|el| (t.name.parse().unwrap(), el))
             })
             .collect::<Vec<_>>();
 
-        if threads_els.iter().any(|(_, el)| *el != 0 && *el != 1) {
-            return Err(Error::Unsupported(format!("unsupported exception level")));
+        if let Some((_, el)) = threads_els.iter().find(|(_, el)| *el != 0 && *el != 1) {
+            return Err(Error::Unsupported(format!("unsupported exception level {el}")));
         }
 
         let code = handler
@@ -179,13 +177,13 @@ fn parse_thread_sync_handler_from_section(
             .and_then(|code| code.ok_or_else(|| Error::ParseThread("thread code must be a string".to_string())))?;
 
         let eret_reg = {
-            static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?:MSR|msr)\s+ELR_EL[012]\s*,\s*([xXwW][0-9]+)").unwrap());
+            static RE: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"(?:MSR|msr)\s+ELR_EL[012]\s*,\s*([xXwW][0-9]+)").unwrap());
             if let Some(cap) = &RE.captures(code) {
-                Some(litmus::parse_reg_from_str(&cap[1])
-                    .map_err(|e| {
-                        log::error!("Not handling eret correctly for this test");
-                        e
-                    })?)
+                Some(litmus::parse_reg_from_str(&cap[1]).map_err(|e| {
+                    log::error!("Not handling eret correctly for this test");
+                    e
+                })?)
             // .ok_or_else(|| Error::ParseSyncHandlerEret(handler_name.to_owned()))?;
             } else {
                 None
@@ -326,18 +324,13 @@ pub fn parse(contents: &str) -> Result<Litmus> {
                     )
                 })
                 .map_err(Error::PageTableSetup)?;
-            let custom_tables = page_table_setup
-                .iter()
-                .any(|c| {
-                    if let isla_axiomatic::page_table::setup::Constraint::Option(op, val) = c {
-                        match (op.as_str(), val) {
-                            ("default_tables", false) => true,
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    }
-                });
+            let custom_tables = page_table_setup.iter().any(|c| {
+                if let isla_axiomatic::page_table::setup::Constraint::Option(op, val) = c {
+                    matches!((op.as_str(), val), ("default_tables", false))
+                } else {
+                    false
+                }
+            });
             if custom_tables {
                 return Err(Error::Unsupported("litmus-toml-translator doesn't support custom tables".to_owned()));
             }

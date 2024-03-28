@@ -1,7 +1,7 @@
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::error::Result;
-use crate::litmus::{InitState, Litmus, Reg, MovSrc};
+use crate::litmus::{InitState, Litmus, MovSrc, Reg};
 
 const INCLUDES: &str = "#include \"lib.h\"";
 
@@ -9,7 +9,6 @@ fn sanitised_test_name(name: &str) -> String {
     name.chars()
         .filter_map(|c| match c {
             '+' => Some('_'),
-            '.' => Some('_'), // temporary TODO: remove me
             '-' | '.' => None,
             'a'..='z' | 'A'..='Z' | '0'..='9' => Some(c),
             _ => {
@@ -34,15 +33,31 @@ fn asm_subs_from_thread_reset(reset: HashMap<Reg, MovSrc>) -> Result<String> {
             continue;
         }
         match val {
-            MovSrc::Nat(_) | MovSrc::Bin(_) | MovSrc::Hex(_)  => {},
-            MovSrc::Reg(var) => {vas.insert(var);},
-            MovSrc::Page(var) => {pages.insert(var);},
-            MovSrc::Pte(var, 1) => {puds.insert(var);},
-            MovSrc::Pte(var, 2) => {pmds.insert(var);},
-            MovSrc::Pte(var, _) => {ptes.insert(var);},
-            MovSrc::Desc(var, 1) => {puddescs.insert(var);},
-            MovSrc::Desc(var, 2) => {pmddescs.insert(var);},
-            MovSrc::Desc(var, _) => {descs.insert(var);},
+            MovSrc::Nat(_) | MovSrc::Bin(_) | MovSrc::Hex(_) => {}
+            MovSrc::Reg(var) => {
+                vas.insert(var);
+            }
+            MovSrc::Page(var) => {
+                pages.insert(var);
+            }
+            MovSrc::Pte(var, 1) => {
+                puds.insert(var);
+            }
+            MovSrc::Pte(var, 2) => {
+                pmds.insert(var);
+            }
+            MovSrc::Pte(var, _) => {
+                ptes.insert(var);
+            }
+            MovSrc::Desc(var, 1) => {
+                puddescs.insert(var);
+            }
+            MovSrc::Desc(var, 2) => {
+                pmddescs.insert(var);
+            }
+            MovSrc::Desc(var, _) => {
+                descs.insert(var);
+            }
         }
     }
 
@@ -80,7 +95,6 @@ fn asm_subs_from_thread_reset(reset: HashMap<Reg, MovSrc>) -> Result<String> {
     Ok(res.join(",\n    "))
 }
 
-
 pub fn write_output(litmus: Litmus) -> Result<String> {
     // println!("{litmus:#?}");
     let name = litmus.name;
@@ -105,7 +119,7 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
         if let Some(eret_reg) = &t.eret_reg {
             for (thread, _el) in &t.threads_els {
                 if !handler_erets.contains_key(thread) {
-                    handler_erets.insert(thread.clone(), vec![]);
+                    handler_erets.insert(*thread, vec![]);
                 }
                 let thread_erets = handler_erets.get_mut(thread).unwrap();
                 thread_erets.push(eret_reg.clone());
