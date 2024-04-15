@@ -1,18 +1,27 @@
-CoWTf.inv+svc.litmus.toml                       # harness stuck (ALIAS bug in harness)
+CoWTf.inv+svc.litmus.toml                       # harness stuck
+CoWTf.inv.EL1+dsb-svc.litmus.toml               # harness stuck
+CoWTf.inv.EL1+dsb-svc-dsb.litmus.toml           # harness stuck
+LB+ctrl-svcs.litmus.toml                        # harness stuck
+LB+svcs.litmus.toml                             # harness stuck
+MP+dmb+ctrl-eret.litmus.toml                    # harness stuck
+MP+dmb+eret.litmus.toml                         # harness stuck
+MP+eret+dmb.litmus.toml                         # harness stuck
+
+BBM.Tf+dsb-tlbiis-dsb.litmus.toml               # exception handler misbehaving
+MP+dmb+svc.litmus.toml                          # exception handled at wrong level?
+MP+svc+dmb.litmus.toml                          # exception handled at wrong level?
 CoRpteT.EL1+dsb-tlbi-dsb.litmus.toml            # EL1 exception handler address incorrect?
-BBM.Tf+dsb-tlbiis-dsb.litmus.toml               # exception handler not ereting
-CoWTf.inv.EL1+dsb-svc.litmus.toml               # harness stuck (ALIAS bug in harness)
-CoWTf.inv.EL1+dsb-svc-dsb.litmus.toml           # harness stuck (ALIAS bug in harness)
-LB+ctrl-svcs.litmus.toml                        # harness stuck (probably ALIAS bug - also labels)
-LB+svcs.litmus.toml                             # harness stuck (probably ALIAS bug - also labels)
-MP+dmb+ctrl-eret.litmus.toml                    # harness stuck (probably ALIAS bug - also labels)
-MP+dmb+eret.litmus.toml                         # harness stuck (ALIAS bug in harness)
-MP+dmb+svc.litmus.toml                          # harness stuck (ALIAS bug in harness)
 
 MP.RTT.inv3+dmb-dmb+dsb-isb.litmus.toml         # unhandled exception??
 RWC.RTR.EL1+ctrl-isb+dsb-tlbi-dsb.litmus.toml   # unhandled exception??
 UpdateWhileUnmappedFull.litmus.toml             # unhandled exception??
 
-# CoTRpte.inv+dsb.litmus.toml                     # overallocated results
-# CoTRpte.inv+dsb-isb.litmus.toml                 # overallocated results
-# and loads more in this class with test sizes greater than 200...
+# CoRR0.alias+po.litmus.toml # ?
+# CoRR0.alias2+po.litmus.toml # ?
+# CoRR2.alias+po.litmus.toml # ?
+
+Stacked2BBM.litmus.toml                         # typo in toml test
+
+gcipi1.litmus.toml                              # harness stuck
+gcipi2.litmus.toml                              # harness stuck
+gcipi3.litmus.toml                              # harness stuck
