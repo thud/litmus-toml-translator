@@ -37,13 +37,15 @@ struct Cli {
     flatten: bool,
     #[arg(short = 'x', long, help = "specify text file with names of tests to ignore")]
     ignore_list: Option<PathBuf>,
+    #[arg(long, help = "don't compile final assertion into one reg per thread for each test run")]
+    keep_histogram: bool,
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 }
 
-fn process_toml(raw_toml: String) -> error::Result<String> {
-    let parsed_litmus = parse::parse(&raw_toml)?;
-    output::write_output(parsed_litmus)
+fn process_toml(raw_toml: String, keep_histogram: bool) -> error::Result<String> {
+    let parsed_litmus = parse::parse(&raw_toml, keep_histogram)?;
+    output::write_output(parsed_litmus, keep_histogram)
 }
 
 fn is_toml(p: &Path) -> bool {
@@ -56,6 +58,7 @@ fn process_path(
     force: bool,
     flatten_to: &Option<PathBuf>,
     ignore: &HashSet<String>,
+    keep_histogram: bool,
     results: &mut parse::TranslationResults,
 ) -> error::Result<()> {
     if ignore.contains(file_or_dir.file_name().unwrap().to_str().unwrap()) {
@@ -80,6 +83,7 @@ fn process_path(
                 force,
                 flatten_to,
                 ignore,
+                keep_histogram,
                 results,
             )
             .unwrap();
@@ -104,7 +108,7 @@ fn process_path(
             );
         } else {
             let toml = std::fs::read_to_string(file).unwrap();
-            match process_toml(toml) {
+            match process_toml(toml, keep_histogram) {
                 Ok(output_code) => {
                     let parent = out_dir.parent().unwrap();
                     std::fs::create_dir_all(parent).unwrap();
@@ -194,21 +198,22 @@ fn main() {
             if paths.len() == 1 {
                 let path = &paths[0]; //.canonicalize().unwrap();
                 if let Some(out) = &cli.output {
-                    process_path(path, out, cli.force, &flatten_to, &ignore, &mut results).unwrap();
+                    process_path(path, out, cli.force, &flatten_to, &ignore, cli.keep_histogram, &mut results).unwrap();
                 } else if path.is_file() {
                     if ignore.contains(path.file_name().unwrap().to_str().unwrap()) {
                         log::warn!("skipping file as it's present in ignore list");
                     } else {
                         // print to stdout
                         let toml = std::fs::read_to_string(path).unwrap();
-                        match process_toml(toml) {
+                        match process_toml(toml, cli.keep_histogram) {
                             Ok(output_code) => println!("{output_code}"),
                             Err(e) => log::error!("failed to translate toml from stdin {e}"),
                         };
                     }
                 } else {
                     // let parent = PathBuf::from(path.parent().unwrap());
-                    process_path(path, path, cli.force, &flatten_to, &ignore, &mut results).unwrap();
+                    process_path(path, path, cli.force, &flatten_to, &ignore, cli.keep_histogram, &mut results)
+                        .unwrap();
                 }
             } else {
                 for path in paths {
@@ -219,12 +224,14 @@ fn main() {
                             cli.force,
                             &flatten_to,
                             &ignore,
+                            cli.keep_histogram,
                             &mut results,
                         )
                         .unwrap();
                     } else {
                         let parent = PathBuf::from(path.parent().unwrap());
-                        process_path(&path, &parent, cli.force, &flatten_to, &ignore, &mut results).unwrap();
+                        process_path(&path, &parent, cli.force, &flatten_to, &ignore, cli.keep_histogram, &mut results)
+                            .unwrap();
                     }
                 }
             }
@@ -236,7 +243,7 @@ fn main() {
             } else {
                 let lines: Vec<_> = stdin.lines().map(Result::unwrap).collect();
                 let toml = lines.join("\n");
-                let output_code = process_toml(toml).unwrap();
+                let output_code = process_toml(toml, cli.keep_histogram).unwrap();
                 if let Some(out) = &cli.output {
                     let mut f = std::fs::File::create(out).unwrap();
                     write!(f, "{output_code}").unwrap();

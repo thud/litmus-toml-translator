@@ -14,7 +14,7 @@ use toml::Value;
 
 use crate::arch;
 use crate::error::{Error, Result};
-use crate::litmus::{self, InitState, Litmus, MovSrc, Reg, Thread, ThreadSyncHandler};
+use crate::litmus::{self, InitState, Litmus, MovSrc, Negatable, Reg, Thread, ThreadSyncHandler};
 
 #[derive(Debug, Default)]
 pub struct TranslationResults {
@@ -80,7 +80,13 @@ fn merge_inits_resets(
     Ok((gp, special))
 }
 
-fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Thread> {
+fn parse_thread(
+    thread_name: &str,
+    thread: &Value,
+    final_assertion: Exp<String>,
+    keep_histogram: bool,
+    symtab: &Symtab,
+) -> Result<Thread> {
     let (code, regs_clobber) = match thread.get("code") {
         Some(code) => code
             .as_str()
@@ -102,6 +108,17 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
             None => Err(Error::ParseThread(format!("No code or call found for thread {}", thread_name)))?,
         },
     }?;
+
+    let assert_conj_of_regs = if keep_histogram {
+        None
+    } else {
+        let reg_val_pairs = parse_assertion_into_conjunction_of_regs(symtab, final_assertion)?;
+        let filtered = reg_val_pairs
+            .into_iter()
+            .filter_map(|((thread, reg), val)| if thread.to_string() == thread_name { Some((reg, val)) } else { None })
+            .collect();
+        Some(filtered)
+    };
 
     let inits = parse_resets(thread.get("init"), symtab)?;
     let resets = parse_resets(thread.get("reset"), symtab)?;
@@ -134,6 +151,7 @@ fn parse_thread(thread_name: &str, thread: &Value, symtab: &Symtab) -> Result<Th
         code: code.to_owned(),
         el,
         reset: merged_resets.into_iter().map(|(reg, val)| (reg, val.to_owned())).collect(),
+        assert: assert_conj_of_regs,
         regs_clobber: regs_clobber.into_iter().collect(),
         vbar_el1,
     })
@@ -197,7 +215,7 @@ fn parse_thread_sync_handler_from_section(
     }
 }
 
-fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> Result<Vec<(u8, Reg)>> {
+fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> Result<BTreeSet<(u8, Reg)>> {
     fn extract_regs_from_exp(symtab: &Symtab, set: &mut BTreeSet<(u8, Reg)>, exp: Exp<String>) -> Result<()> {
         match exp {
             Exp::EqLoc(Loc::Register { reg, thread_id }, _exp) => {
@@ -234,7 +252,66 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
     }
     let mut set = BTreeSet::new();
     extract_regs_from_exp(symtab, &mut set, final_assertion)?;
-    Ok(set.into_iter().collect())
+    Ok(set)
+}
+
+fn parse_assertion_into_conjunction_of_regs(
+    symtab: &Symtab,
+    final_assertion: Exp<String>,
+) -> Result<Vec<((u8, Reg), Negatable<MovSrc>)>> {
+    fn extract_regs_from_exp(
+        symtab: &Symtab,
+        reg_val_pairs: &mut HashMap<(u8, Reg), Negatable<MovSrc>>,
+        not: bool,
+        exp: Exp<String>,
+    ) -> Result<()> {
+        match exp {
+            Exp::EqLoc(Loc::Register { reg, thread_id }, exp) => {
+                let thread_id = thread_id.try_into().map_err(|e| Error::ParseThread(format!("{e}")))?;
+                let reg = litmus::parse_reg_from_str(&zencode::decode(symtab.to_str(reg)))?;
+                let val: MovSrc = exp.as_ref().try_into().unwrap();
+                if not {
+                    reg_val_pairs.insert((thread_id, reg), Negatable::Not(val));
+                } else {
+                    reg_val_pairs.insert((thread_id, reg), Negatable::Eq(val));
+                }
+                Ok(())
+            }
+            Exp::Not(exp) => {
+                extract_regs_from_exp(symtab, reg_val_pairs, !not, *exp)
+            }
+            Exp::And(exps) => {
+                for exp in exps {
+                    extract_regs_from_exp(symtab, reg_val_pairs, not, exp)?;
+                }
+                Ok(())
+            }
+            // Exp::Implies(exp1, exp2) => {
+            //     extract_regs_from_exp(symtab, set, *exp1)?;
+            //     extract_regs_from_exp(symtab, set, *exp2)?;
+            //     Ok(())
+            // }
+            Exp::Or(exps) => {
+                Err(Error::Unsupported(format!("Can't yet use '|' (or) in assertion ({exps:?})")))
+            }
+            // TODO: Currently ignoring function application
+            exp => {
+                Err(Error::Unsupported(format!("Can't yet use final assertions with complex terms {exp:?}")))
+            }
+            // Exp::Loc(A),
+            // Exp::Label(String),
+            // Exp::True,
+            // Exp::False,
+            // Exp::Bin(String),
+            // Exp::Hex(String),
+            // Exp::Bits64(u64, u32),
+            // Exp::Nat(u64),
+            // Exp::App(String, Vec<Exp<A>>, HashMap<String, Exp<A>>),
+        }
+    }
+    let mut reg_val_pairs = HashMap::new();
+    extract_regs_from_exp(symtab, &mut reg_val_pairs, false, final_assertion)?;
+    Ok(reg_val_pairs.into_iter().collect())
 }
 
 fn get_additional_vars_from_pts(
@@ -281,7 +358,7 @@ fn get_additional_vars_from_pts(
     Ok(all_vars.difference(&existing_vars).cloned().collect())
 }
 
-pub fn parse(contents: &str) -> Result<Litmus> {
+pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
     let litmus_toml = contents.parse::<Value>().map_err(Error::ParseToml)?;
 
     let mmu_on = litmus_toml.get("page_table_setup").is_some();
@@ -345,18 +422,50 @@ pub fn parse(contents: &str) -> Result<Litmus> {
     // eprintln!("{page_table_setup:#?}");
 
     let init_state = if mmu_on {
-        litmus::gen_init_state(&page_table_setup)
+        litmus::gen_init_state(&page_table_setup, &var_names)?
     } else {
         var_names.clone().into_iter().map(|var| InitState::Var(var, "0".to_owned())).collect()
     };
 
     let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone())?;
 
+    let fin = litmus_toml
+        .get("final")
+        .ok_or_else(|| Error::GetTomlValue("No final section found in litmus file".to_owned()))?;
+    let (final_assertion_str, final_assertion) = (match fin.get("assertion").and_then(Value::as_str) {
+        Some(assertion) => {
+            let lexer = exp_lexer::ExpLexer::new(assertion);
+            let sizeof = axiomatic_litmus::parse_sizeof_types(&litmus_toml).unwrap();
+            exp_parser::ExpParser::new()
+                .parse(&sizeof, isa.default_sizeof, &symtab, &isa.register_renames, lexer)
+                .map(|parsed| (assertion.to_owned(), parsed))
+                .map_err(|error| Error::ParseFinalAssertion(error.to_string()))
+        }
+        None => Err(Error::GetTomlValue("No final assertion found in litmus file".to_owned())),
+    })?;
+
     let threads: Vec<Thread> = litmus_toml
         .get("thread")
         .and_then(|t| t.as_table())
         .ok_or_else(|| Error::GetTomlValue("No threads found in litmus file (must be a toml table)".to_owned()))
-        .and_then(|t| t.into_iter().map(|(name, thread)| parse_thread(name.as_ref(), thread, &symtab)).collect())?;
+        .and_then(|t| {
+            t.into_iter()
+                .map(|(name, thread)| {
+                    parse_thread(name.as_ref(), thread, final_assertion.clone(), keep_histogram, &symtab)
+                })
+                .collect()
+        })?;
+
+    let regs = if keep_histogram {
+        regs_from_final_assertion(&symtab, final_assertion.clone())?.into_iter().collect()
+    } else {
+        let mut threads_cared_about = BTreeSet::new();
+        let used_regs = regs_from_final_assertion(&symtab, final_assertion.clone())?;
+        for (thread, _reg) in used_regs {
+            threads_cared_about.insert(thread);
+        }
+        threads_cared_about.iter().map(|thread_name| (*thread_name, Reg::X(0))).collect()
+    };
 
     let sections = litmus_toml
         .get("section")
@@ -372,22 +481,6 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         })
         .collect::<Result<_>>()?;
 
-    let fin = litmus_toml
-        .get("final")
-        .ok_or_else(|| Error::GetTomlValue("No final section found in litmus file".to_owned()))?;
-    let final_assertion = (match fin.get("assertion").and_then(Value::as_str) {
-        Some(assertion) => {
-            let lexer = exp_lexer::ExpLexer::new(assertion);
-            let sizeof = axiomatic_litmus::parse_sizeof_types(&litmus_toml).unwrap();
-            exp_parser::ExpParser::new()
-                .parse(&sizeof, isa.default_sizeof, &symtab, &isa.register_renames, lexer)
-                .map_err(|error| Error::ParseFinalAssertion(error.to_string()))
-        }
-        None => Err(Error::GetTomlValue("No final assertion found in litmus file".to_owned())),
-    })?;
-    let regs = regs_from_final_assertion(&symtab, final_assertion.clone())?;
-    // eprintln!("Final assertion: {final_assertion:?}");
-
     Ok(Litmus {
         arch,
         name,
@@ -396,7 +489,8 @@ pub fn parse(contents: &str) -> Result<Litmus> {
         page_table_setup,
         threads,
         thread_sync_handlers,
-        final_assertion: "test assertion TODO".to_owned(), //final_assertion,
+        final_assertion_str,
+        final_assertion,
         var_names,
         additional_vars,
         regs,

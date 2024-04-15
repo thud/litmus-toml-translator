@@ -19,12 +19,19 @@ pub struct Litmus {
     pub page_table_setup: Vec<page_table::setup::Constraint>,
     pub threads: Vec<Thread>,
     pub thread_sync_handlers: Vec<ThreadSyncHandler>,
-    pub final_assertion: String, //exp::Exp<String>,
     pub var_names: Vec<String>,
     pub additional_vars: Vec<String>,
     pub regs: Vec<(u8, Reg)>,
+    pub final_assertion_str: String,
+    pub final_assertion: Exp<String>,
     pub mmu_on: bool,
     pub init_state: Vec<InitState>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Negatable<T> {
+    Eq(T),
+    Not(T),
 }
 
 #[derive(Debug)]
@@ -35,7 +42,8 @@ pub struct Thread {
     pub regs_clobber: Vec<Reg>,
     pub vbar_el1: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
-}
+    pub assert: Option<Vec<(Reg, Negatable<MovSrc>)>>, // Some(conjunction of reg-val pairs) or ..
+} // None if 'keep_histogram' cli option used.
 
 #[derive(Debug)]
 pub struct ThreadSyncHandler {
@@ -112,6 +120,25 @@ impl MovSrc {
             Self::Desc(sym, 3) => format!("%[{sym}desc]"),
             Self::Desc(sym, 2) => format!("%[{sym}pmddesc]"),
             Self::Desc(sym, 1) => format!("%[{sym}puddesc]"),
+
+            Self::Pte(_, _) => unimplemented!(),
+            Self::Desc(_, _) => unimplemented!(),
+        }
+    }
+
+    pub fn as_c_code(&self) -> String {
+        match self {
+            Self::Nat(n) => format!("{}", n.lower_u64()),
+            Self::Bin(n) => format!("0b{:b}", n.lower_u64()),
+            Self::Hex(n) => format!("0x{:x}", n.lower_u64()),
+            Self::Reg(reg) => format!("out{}", reg),
+            Self::Pte(sym, 3) => format!("var_pte(data, \"{sym}\")"),
+            Self::Pte(sym, 2) => format!("var_pmd(data, \"{sym}\")"),
+            Self::Pte(sym, 1) => format!("var_pud(data, \"{sym}\")"),
+            Self::Desc(sym, 3) => format!("var_ptedesc(data, \"{sym}\")"),
+            Self::Desc(sym, 2) => format!("var_pmddesc(data, \"{sym}\")"),
+            Self::Desc(sym, 1) => format!("var_puddesc(data, \"{sym}\")"),
+            Self::Page(sym) => format!("var_page(\"{sym}\")"),
 
             Self::Pte(_, _) => unimplemented!(),
             Self::Desc(_, _) => unimplemented!(),
@@ -295,6 +322,23 @@ impl Reg {
         }
     }
 
+    pub fn idx(&self) -> u8 {
+        use Reg::*;
+        match &self {
+            X(n) => *n,
+            W(n) => *n,
+            B(n) => *n,
+            H(n) => *n,
+            S(n) => *n,
+            D(n) => *n,
+            Q(n) => *n,
+
+            PState(_) => unimplemented!("Converting PSTATE regs to idx is not possible."),
+            VBar(_) => unimplemented!("Converting PSTATE regs to idx is not possible."),
+            Isla(_) => unimplemented!("Converting isla-specific registers to idx is not possible."),
+        }
+    }
+
     pub fn as_asm_quoted(&self) -> String {
         format!("\"{}\"", self.as_asm())
     }
@@ -365,9 +409,13 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
 }
 
 // TODO: generate unmapped vars if no other constraints
-pub fn gen_init_state(page_table_setup: &[page_table::setup::Constraint]) -> Vec<InitState> {
-    use page_table::setup::{Constraint, Exp, TableConstraint};
-    page_table_setup
+pub fn gen_init_state(
+    page_table_setup: &[page_table::setup::Constraint],
+    symbolics: &Vec<String>,
+) -> Result<Vec<InitState>> {
+    use page_table::setup::{AddressConstraint, Constraint, Exp, TableConstraint};
+    let mut all_pas = BTreeSet::new();
+    let specified_inits = page_table_setup
         .iter()
         .filter_map(|constraint| match constraint {
             Constraint::Initial(Exp::Id(id), val) => {
@@ -386,7 +434,133 @@ pub fn gen_init_state(page_table_setup: &[page_table::setup::Constraint]) -> Vec
                     Some(InitState::Alias(from.clone(), to.clone()))
                 }
             }
+            Constraint::Address(AddressConstraint::Physical(_alignment, phys)) => {
+                all_pas.extend(phys.clone());
+                None
+            }
             _ => None,
         })
-        .collect()
+        .collect();
+
+    fill_unbacked_addrs(specified_inits, symbolics, &all_pas)
+}
+
+fn fill_unbacked_addrs(
+    specified_inits: Vec<InitState>,
+    symbolics: &Vec<String>,
+    pas: &BTreeSet<String>,
+) -> Result<Vec<InitState>> {
+    // Many Isla tests omit initial values for some addresses. This causes problems for
+    // system-litmus-harness since aliases should be backed by heap memory. Here, we initialise any
+    // so-far unbacked addresses with zeros.
+    let mut tweaked_inits = specified_inits.clone();
+
+    // we create a simple graph where aliases correspond to edges (in case we have multiple aliases
+    // for same physical address).
+    let mut edges = HashMap::new();
+    let mut unbacked_addrs = BTreeSet::new();
+    let mut backed_addrs = HashMap::new();
+    let mut alias_directions: Vec<(String, String)> = vec![];
+
+    for init in &specified_inits {
+        if let InitState::Alias(from, to) = init {
+            if !edges.contains_key(from) {
+                edges.insert(from.clone(), vec![]);
+            }
+            if !edges.contains_key(to) {
+                edges.insert(to.clone(), vec![]);
+            }
+            let from_adj = edges.get_mut(from).unwrap();
+            from_adj.push(to);
+            let to_adj = edges.get_mut(to).unwrap();
+            to_adj.push(from);
+            unbacked_addrs.insert(to);
+            unbacked_addrs.insert(from);
+        }
+    }
+
+    fn dfs(
+        addr: &String,
+        backed_val: Option<String>,
+        edges: &HashMap<String, Vec<&String>>,
+        seen: &mut HashMap<String, Option<String>>,
+        alias_directions: &mut Vec<(String, String)>,
+    ) -> Result<bool> {
+        seen.insert(addr.to_owned(), backed_val.clone());
+        let mut backed = false;
+        if let Some(aliases) = edges.get(addr) {
+            for alias in aliases {
+                if let Some(val) = seen.get(*alias) {
+                    if val != &backed_val {
+                        return Err(Error::PageTableSetup(format!(
+                            "Multiple backed values for same address ({val:?} and {backed_val:?})"
+                        )));
+                    }
+                } else {
+                    backed |= dfs(alias, backed_val.clone(), edges, seen, alias_directions)?;
+                    alias_directions.push((addr.to_owned(), (*alias).to_owned()));
+                }
+            }
+        }
+        Ok(backed)
+    }
+
+    for init in &specified_inits {
+        match init {
+            InitState::Var(id, val) => {
+                unbacked_addrs.remove(id);
+                backed_addrs.insert(id.clone(), Some(val.clone()));
+            }
+            InitState::Unmapped(id) => {
+                unbacked_addrs.remove(id);
+                backed_addrs.insert(id.clone(), None);
+            }
+            _ => {}
+        }
+    }
+
+    let initially_backed_addrs = backed_addrs.clone();
+
+    for (addr, val) in initially_backed_addrs {
+        let _ = dfs(&addr, val, &edges, &mut backed_addrs, &mut alias_directions)?;
+    }
+
+    for backed_addr in backed_addrs.keys() {
+        unbacked_addrs.remove(backed_addr);
+    }
+
+    let default_val_for_pa = Some("0".to_owned());
+
+    for pa in pas {
+        if !backed_addrs.contains_key(pa) {
+            backed_addrs.insert(pa.clone(), default_val_for_pa.clone());
+            let _ = dfs(pa, default_val_for_pa.clone(), &edges, &mut backed_addrs, &mut alias_directions)?;
+            tweaked_inits.push(InitState::Var(pa.clone(), "0".to_owned()));
+        }
+    }
+
+    for backed_addr in backed_addrs.keys() {
+        unbacked_addrs.remove(&backed_addr);
+    }
+
+    // check if any addrs wtill not backed
+    for unbacked_addr in unbacked_addrs {
+        tweaked_inits.push(InitState::Unmapped(unbacked_addr.clone()));
+    }
+    for sym in symbolics {
+        if !backed_addrs.contains_key(sym) {
+            tweaked_inits.push(InitState::Unmapped(sym.clone()));
+        }
+    }
+
+    // Filter out all aliases
+    tweaked_inits = tweaked_inits.into_iter().filter(|init| !matches!(init, InitState::Alias(..))).collect::<Vec<_>>();
+
+    tweaked_inits.extend(alias_directions.into_iter().map(|(from, to)| InitState::Alias(to, from)));
+
+    // for pa in unbacked_pas {
+    //     tweaked_inits.push(InitState::Var(pa.to_owned(), "0".to_owned()));
+    // }
+
+    Ok(tweaked_inits)
 }

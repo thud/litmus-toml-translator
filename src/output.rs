@@ -1,15 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::error::Result;
-use crate::litmus::{InitState, Litmus, MovSrc, Reg};
+use crate::litmus::{InitState, Litmus, MovSrc, Negatable, Reg};
 
 const INCLUDES: &str = "#include \"lib.h\"";
 
 fn sanitised_test_name(name: &str) -> String {
     name.chars()
         .filter_map(|c| match c {
-            '+' => Some('_'),
-            '-' | '.' => None,
+            '+' | '-' | '.' => Some('_'),
+            // '-' | '.' => None,
             'a'..='z' | 'A'..='Z' | '0'..='9' => Some(c),
             _ => {
                 log::warn!("found unexpected char {c:?} in test name");
@@ -19,7 +19,10 @@ fn sanitised_test_name(name: &str) -> String {
         .collect()
 }
 
-fn asm_subs_from_thread_reset(reset: HashMap<Reg, MovSrc>) -> Result<String> {
+fn asm_subs_from_thread_reset(
+    reset: HashMap<Reg, MovSrc>,
+    thread_assert: &Option<Vec<(Reg, Negatable<MovSrc>)>>,
+) -> Result<String> {
     let mut vas = BTreeSet::new();
     let mut ptes = BTreeSet::new();
     let mut pages = BTreeSet::new();
@@ -90,12 +93,19 @@ fn asm_subs_from_thread_reset(reset: HashMap<Reg, MovSrc>) -> Result<String> {
     if !puddescs.is_empty() {
         res.push(format!("ASM_VAR_PUDDESCs(data, {})", to_comma_list(puddescs)));
     }
-    res.push("ASM_REGS(data, REGS)".to_owned());
+
+    if let Some(asserts) = thread_assert {
+        if !asserts.is_empty() {
+            res.push("[tmpout] \"r\" (tmpout)".to_owned());
+        }
+    } else {
+        res.push("ASM_REGS(data, REGS)".to_owned());
+    }
 
     Ok(res.join(",\n    "))
 }
 
-pub fn write_output(litmus: Litmus) -> Result<String> {
+pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
     // println!("{litmus:#?}");
     let name = litmus.name;
     let sanitised_name = sanitised_test_name(&name) + "__toml";
@@ -197,6 +207,19 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
             let thread_no: usize = thread.name.parse().unwrap(); // TODO: this should be error checked
             let thread_name = format!("P{thread_no}");
 
+            let assert_regs_setup = thread
+                .assert
+                .as_ref()
+                .and_then(|reg_val_pairs| {
+                    let len = reg_val_pairs.len();
+                    if len > 0 {
+                        Some(format!("\n  u64 tmpout[32] = {{0}};"))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
             let reg_setup = if thread.reset.is_empty() {
                 "".to_owned()
             } else {
@@ -213,12 +236,29 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
                 )
             };
 
-            let output_var = {
+            let output_var = if keep_histogram {
                 let reg_strs = litmus
                     .regs
                     .iter()
                     .filter(|(thread_name, _)| thread_name.to_string() == thread.name)
                     .map(|(thread, reg)| format!("\"str {}, [%[{}]]\\n\\t\"", reg.as_asm(), reg.as_output_str(*thread)))
+                    .collect::<Vec<_>>();
+                if reg_strs.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(
+                        "\n\n    /* output */\
+                             \n    {}",
+                        reg_strs.join("\n    ")
+                    )
+                }
+            } else {
+                let reg_strs = thread
+                    .assert
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|(reg, _)| format!("\"str {}, [%[tmpout],#{}]\\n\\t\"", reg.as_asm(), reg.idx() * 8))
                     .collect::<Vec<_>>();
                 if reg_strs.is_empty() {
                     "".to_string()
@@ -251,9 +291,34 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
                 regs_clobber = [regs_clobber, eret_regs].join(", ");
             }
 
-            let asm_subs = asm_subs_from_thread_reset(thread.reset).unwrap();
+            let asm_subs = asm_subs_from_thread_reset(thread.reset, &thread.assert).unwrap();
+
+            let c_compiled_assert = thread
+                .assert
+                .map(|reg_val_pairs| {
+                    if reg_val_pairs.is_empty() {
+                        "".to_owned()
+                    } else {
+                        let regs = reg_val_pairs
+                            .iter()
+                            .map(|(reg, val)| {
+                                let reg = reg.idx();
+                                match val {
+                                    Negatable::Eq(val) => format!("(tmpout[{reg}] == {})", val.as_c_code()),
+                                    Negatable::Not(val) => format!("(tmpout[{reg}] != {})", val.as_c_code()),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" & ");
+                        let comment = "/* compile assertion into single register */";
+                        format!("\n\n    {comment}\n    *out_reg(data, \"p{}:x0\") = {regs};", thread.name)
+                    }
+                })
+                .unwrap_or_else(|| "".to_owned());
+
             format!(
                 "static void {thread_name}(litmus_test_run* data) {{\
+                    {assert_regs_setup}\
                 \n  asm volatile (\
                       {reg_setup}\
                 \n    /* test */\
@@ -263,6 +328,7 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
                 \n  : {asm_subs}\
                 \n  : \"cc\", \"memory\", {regs_clobber}\
                 \n  );\
+                    {c_compiled_assert}\
                 \n}}\
                 "
             )
@@ -270,7 +336,7 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
         .collect::<Vec<String>>()
         .join("\n\n");
 
-    let final_assertion = litmus.final_assertion;
+    let final_assertion_str = litmus.final_assertion_str;
 
     let init_state = if litmus.init_state.is_empty() {
         "".to_owned()
@@ -293,9 +359,12 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
         format!("\n    {len},\n    {state_str},\n  ")
     };
 
-    let interesting_results: Vec<String> = vec![];
-    let no_interesting_results = interesting_results.len();
-    let interesting_results = interesting_results.join(",\n");
+    let interesting_result = if keep_histogram {
+        "".to_owned()
+    } else {
+        let v = vec!["1"; litmus.regs.len()].join(",");
+        format!("\n  .interesting_result = (uint64_t[]){{{v}}},")
+    };
 
     let requires_pgtable = if litmus.mmu_on { "1" } else { "0" };
 
@@ -314,7 +383,7 @@ pub fn write_output(litmus: Litmus) -> Result<String> {
 {c_thread_sync_handlers}
 
 // Final assertion
-// {final_assertion}
+// {final_assertion_str}
 
 // Final test struct
 litmus_test_t {sanitised_name} = {{
@@ -322,9 +391,8 @@ litmus_test_t {sanitised_name} = {{
   MAKE_THREADS({thread_count}),
   MAKE_VARS(VARS{additional_vars}),
   MAKE_REGS(REGS),
-  INIT_STATE({init_state}),
-  .no_interesting_results = {no_interesting_results},
-  .interesting_results = (uint64_t*[]){{{interesting_results}}},
+  INIT_STATE({init_state}),\
+  {interesting_result}
   // .no_sc_results = TODO,
   {thread_sync_handler_refs}
   .requires_pgtable = {requires_pgtable},

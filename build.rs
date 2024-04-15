@@ -27,7 +27,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
-// This is a modified version of isla/build.rs in order to set the ISLA_VERSION
+// This is a modified version of isla/isla-lib/build.rs in order to set the ISLA_VERSION
 // env variable to its relevant value.
 
 use std::path::Path;
