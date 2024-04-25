@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
 use once_cell::sync::Lazy;
-use regex::Regex;
 
 use isla_axiomatic::litmus::exp::{Exp, Loc};
 use isla_axiomatic::litmus::{self as axiomatic_litmus, exp_lexer, exp_parser};
@@ -152,7 +151,7 @@ fn parse_thread(
         el,
         reset: merged_resets.into_iter().map(|(reg, val)| (reg, val.to_owned())).collect(),
         assert: assert_conj_of_regs,
-        regs_clobber: regs_clobber.into_iter().collect(),
+        regs_clobber,
         vbar_el1,
     })
 }
@@ -194,21 +193,9 @@ fn parse_thread_sync_handler_from_section(
             .map(|code| code.as_str())
             .and_then(|code| code.ok_or_else(|| Error::ParseThread("thread code must be a string".to_string())))?;
 
-        let eret_reg = {
-            static RE: Lazy<Regex> =
-                Lazy::new(|| Regex::new(r"(?:MSR|msr)\s+ELR_EL[012]\s*,\s*([xXwW][0-9]+)").unwrap());
-            if let Some(cap) = &RE.captures(code) {
-                Some(litmus::parse_reg_from_str(&cap[1]).map_err(|e| {
-                    log::error!("Not handling eret correctly for this test");
-                    e
-                })?)
-            // .ok_or_else(|| Error::ParseSyncHandlerEret(handler_name.to_owned()))?;
-            } else {
-                None
-            }
-        };
+        let regs_clobber = litmus::parse_regs_from_asm(code)?;
 
-        Ok(Some(ThreadSyncHandler { name: handler_name.to_owned(), code: code.to_owned(), eret_reg, threads_els }))
+        Ok(Some(ThreadSyncHandler { name: handler_name.to_owned(), code: code.to_owned(), regs_clobber, threads_els }))
     } else {
         // Can't be a functioning thread sync handler.
         Ok(None)
@@ -373,8 +360,6 @@ pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
         .and_then(|n| n.as_str().map(str::to_string))
         .ok_or_else(|| Error::GetTomlValue("No name found in litmus file".to_owned()))?;
 
-    let hash = litmus_toml.get("hash").map(|h| h.to_string());
-
     let symbolic = litmus_toml
         .get("symbolic")
         .or(litmus_toml.get("addresses"))
@@ -383,7 +368,7 @@ pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
 
     let var_names: Vec<String> = symbolic.iter().map(Value::as_str).map(|v| v.unwrap().to_owned()).collect();
 
-    let (page_table_setup, page_table_setup_source) = if let Some(setup) = litmus_toml.get("page_table_setup") {
+    let (page_table_setup, page_table_setup_str) = if let Some(setup) = litmus_toml.get("page_table_setup") {
         if litmus_toml.get("locations").is_some() {
             return Err(Error::GetTomlValue(
                 "Cannot have a page_table_setup and locations in the same test".to_owned(),
@@ -427,7 +412,7 @@ pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
         var_names.clone().into_iter().map(|var| InitState::Var(var, "0".to_owned())).collect()
     };
 
-    let additional_vars = get_additional_vars_from_pts(&page_table_setup, var_names.clone())?;
+    let additional_var_names = get_additional_vars_from_pts(&page_table_setup, var_names.clone())?;
 
     let fin = litmus_toml
         .get("final")
@@ -484,15 +469,13 @@ pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
     Ok(Litmus {
         arch,
         name,
-        hash,
-        page_table_setup_source,
-        page_table_setup,
+        page_table_setup_str,
         threads,
         thread_sync_handlers,
         final_assertion_str,
         final_assertion,
         var_names,
-        additional_vars,
+        additional_var_names,
         regs,
         mmu_on,
         init_state,

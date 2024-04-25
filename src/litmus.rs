@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use once_cell::sync::Lazy;
@@ -14,13 +14,11 @@ use crate::error::{Error, Result};
 pub struct Litmus {
     pub arch: String,
     pub name: String,
-    pub hash: Option<String>,
-    pub page_table_setup_source: String,
-    pub page_table_setup: Vec<page_table::setup::Constraint>,
+    pub page_table_setup_str: String,
     pub threads: Vec<Thread>,
     pub thread_sync_handlers: Vec<ThreadSyncHandler>,
     pub var_names: Vec<String>,
-    pub additional_vars: Vec<String>,
+    pub additional_var_names: Vec<String>,
     pub regs: Vec<(u8, Reg)>,
     pub final_assertion_str: String,
     pub final_assertion: Exp<String>,
@@ -39,7 +37,7 @@ pub struct Thread {
     pub name: String,
     pub code: String,
     pub el: u8,
-    pub regs_clobber: Vec<Reg>,
+    pub regs_clobber: HashSet<Reg>,
     pub vbar_el1: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
     pub assert: Option<Vec<(Reg, Negatable<MovSrc>)>>, // Some(conjunction of reg-val pairs) or ..
@@ -49,7 +47,7 @@ pub struct Thread {
 pub struct ThreadSyncHandler {
     pub name: String,
     pub code: String,
-    pub eret_reg: Option<Reg>,
+    pub regs_clobber: HashSet<Reg>,
     pub threads_els: Vec<(usize, u8)>, // (thread_no, el)
 }
 
@@ -351,9 +349,9 @@ impl Reg {
     }
 }
 
-pub fn parse_regs_from_asm(asm: &str) -> Result<BTreeSet<Reg>> {
+pub fn parse_regs_from_asm(asm: &str) -> Result<HashSet<Reg>> {
     let lines = asm.trim().split('\n');
-    let mut hs = BTreeSet::new();
+    let mut hs = HashSet::new();
     for line in lines {
         let line = match line.split_once(';') {
             Some((instr, _comment)) => instr,
@@ -414,7 +412,7 @@ pub fn gen_init_state(
     symbolics: &Vec<String>,
 ) -> Result<Vec<InitState>> {
     use page_table::setup::{AddressConstraint, Constraint, Exp, TableConstraint};
-    let mut all_pas = BTreeSet::new();
+    let mut all_pas = HashSet::new();
     let specified_inits = page_table_setup
         .iter()
         .filter_map(|constraint| match constraint {
@@ -448,7 +446,7 @@ pub fn gen_init_state(
 fn fill_unbacked_addrs(
     specified_inits: Vec<InitState>,
     symbolics: &Vec<String>,
-    pas: &BTreeSet<String>,
+    pas: &HashSet<String>,
 ) -> Result<Vec<InitState>> {
     // Many Isla tests omit initial values for some addresses. This causes problems for
     // system-litmus-harness since aliases should be backed by heap memory. Here, we initialise any
@@ -458,7 +456,7 @@ fn fill_unbacked_addrs(
     // we create a simple graph where aliases correspond to edges (in case we have multiple aliases
     // for same physical address).
     let mut edges = HashMap::new();
-    let mut unbacked_addrs = BTreeSet::new();
+    let mut unbacked_addrs = HashSet::new();
     let mut backed_addrs = HashMap::new();
     let mut alias_directions: Vec<(String, String)> = vec![];
 

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
 use crate::litmus::{InitState, Litmus, MovSrc, Negatable, Reg};
@@ -23,14 +23,14 @@ fn asm_subs_from_thread_reset(
     reset: HashMap<Reg, MovSrc>,
     thread_assert: &Option<Vec<(Reg, Negatable<MovSrc>)>>,
 ) -> Result<String> {
-    let mut vas = BTreeSet::new();
-    let mut ptes = BTreeSet::new();
-    let mut pages = BTreeSet::new();
-    let mut descs = BTreeSet::new();
-    let mut pmds = BTreeSet::new();
-    let mut puds = BTreeSet::new();
-    let mut pmddescs = BTreeSet::new();
-    let mut puddescs = BTreeSet::new();
+    let mut vas = HashSet::new();
+    let mut ptes = HashSet::new();
+    let mut pages = HashSet::new();
+    let mut descs = HashSet::new();
+    let mut pmds = HashSet::new();
+    let mut puds = HashSet::new();
+    let mut pmddescs = HashSet::new();
+    let mut puddescs = HashSet::new();
     for (reg, val) in reset {
         if matches!(reg, Reg::Isla(_)) {
             continue;
@@ -64,8 +64,10 @@ fn asm_subs_from_thread_reset(
         }
     }
 
-    fn to_comma_list(a: BTreeSet<String>) -> String {
-        a.iter().cloned().collect::<Vec<_>>().join(", ")
+    fn to_comma_list(a: HashSet<String>) -> String {
+        let mut v = a.iter().cloned().collect::<Vec<_>>();
+        v.sort();
+        v.join(", ")
     }
 
     let mut res = vec![];
@@ -110,10 +112,10 @@ pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
     let name = litmus.name;
     let sanitised_name = sanitised_test_name(&name) + "__toml";
     let vars = litmus.var_names.join(", ");
-    let additional_vars = if litmus.additional_vars.is_empty() {
+    let additional_vars = if litmus.additional_var_names.is_empty() {
         "".to_owned()
     } else {
-        format!(", {}", litmus.additional_vars.join(", "))
+        format!(", {}", litmus.additional_var_names.join(", "))
     };
     let regs =
         litmus.regs.iter().map(|(thread, reg)| format!("p{thread}{}", reg.as_asm())).collect::<Vec<_>>().join(", ");
@@ -124,16 +126,14 @@ pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
     } else {
         litmus.threads.iter().map(|thread| thread.el.to_string()).collect::<Vec<_>>().join(",")
     };
-    let mut handler_erets = HashMap::new();
+    let mut handler_clobbers = HashMap::new();
     for t in &litmus.thread_sync_handlers {
-        if let Some(eret_reg) = &t.eret_reg {
-            for (thread, _el) in &t.threads_els {
-                if !handler_erets.contains_key(thread) {
-                    handler_erets.insert(*thread, vec![]);
-                }
-                let thread_erets = handler_erets.get_mut(thread).unwrap();
-                thread_erets.push(eret_reg.clone());
+        for (thread, _el) in &t.threads_els {
+            if !handler_clobbers.contains_key(thread) {
+                handler_clobbers.insert(*thread, HashSet::new());
             }
+            let clobbers = handler_clobbers.get_mut(thread).unwrap();
+            clobbers.extend(t.regs_clobber.clone());
         }
     }
     let thread_sync_handler_refs = {
@@ -285,11 +285,17 @@ pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
                 .collect::<Vec<String>>()
                 .join("");
             let body = body.trim();
-            let mut regs_clobber = thread.regs_clobber.iter().map(Reg::as_asm_quoted).collect::<Vec<_>>().join(", ");
-            if let Some(eret_regs) = handler_erets.get(&thread_no) {
-                let eret_regs = eret_regs.iter().map(|r| r.as_asm_quoted()).collect::<Vec<_>>().join(", ");
-                regs_clobber = [regs_clobber, eret_regs].join(", ");
+
+            let mut all_clobbers = thread.regs_clobber;
+            if let Some(clobbers) = handler_clobbers.remove(&thread_no) {
+                all_clobbers.extend(clobbers);
             }
+            let all_clobbers_sorted = {
+                let mut v = all_clobbers.into_iter().collect::<Vec<_>>();
+                v.sort();
+                v
+            };
+            let all_clobbers_asm = all_clobbers_sorted.iter().map(Reg::as_asm_quoted).collect::<Vec<_>>().join(", ");
 
             let asm_subs = asm_subs_from_thread_reset(thread.reset, &thread.assert).unwrap();
 
@@ -326,7 +332,7 @@ pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
                       {output_var}\
                 \n  :\
                 \n  : {asm_subs}\
-                \n  : \"cc\", \"memory\", {regs_clobber}\
+                \n  : \"cc\", \"memory\", {all_clobbers_asm}\
                 \n  );\
                     {c_compiled_assert}\
                 \n}}\
@@ -393,7 +399,6 @@ litmus_test_t {sanitised_name} = {{
   MAKE_REGS(REGS),
   INIT_STATE({init_state}),\
   {interesting_result}
-  // .no_sc_results = TODO,
   {thread_sync_handler_refs}
   .requires_pgtable = {requires_pgtable},
   .start_els = (int[]){{{start_els}}},
