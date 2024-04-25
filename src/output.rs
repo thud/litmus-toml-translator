@@ -317,7 +317,7 @@ pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
                             .collect::<Vec<_>>()
                             .join(" & ");
                         let comment = "/* compile assertion into single register */";
-                        format!("\n\n    {comment}\n    *out_reg(data, \"p{}:x0\") = {regs};", thread.name)
+                        format!("\n\n  {comment}\n  *out_reg(data, \"p{}:x0\") = {regs};", thread.name)
                     }
                 })
                 .unwrap_or_else(|| "".to_owned());
