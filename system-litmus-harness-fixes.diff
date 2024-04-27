@@ -1,0 +1,48 @@
+diff --git a/Makefile b/Makefile
+index 1200506..ca96f71 100644
+--- a/Makefile
++++ b/Makefile
+@@ -175,7 +175,7 @@ CFLAGS = -O0 -nostdlib \
+ 		$(CFLAGS_DEPS) \
+ 		-ffreestanding -fno-omit-frame-pointer -fno-pie -fno-pic \
+ 		-mstrict-align \
+-		-march=armv8-a+nofp \
++		-march=armv8.5-a+nofp \
+ 		-Wall $(addprefix -Wno-,$(CCNOWARN)) $(addprefix -Werror=,$(CCERRORS)) \
+ 		-Wshadow \
+ 		-D__VERSION_STR__="\"$(_VERSION)\"" \
+@@ -412,4 +412,4 @@ include mk/unittests.mk
+ .PHONY: list
+ list:
+ 	@echo 'Please choose from the following targets:'
+-	@$(MAKE) -prRq -f $(firstword $(MAKEFILE_LIST)) : 2>/dev/null | grep -o '^build[^:]*' | grep -o '^[^$$]*$$' | sort
+\ No newline at end of file
++	@$(MAKE) -prRq -f $(firstword $(MAKEFILE_LIST)) : 2>/dev/null | grep -o '^build[^:]*' | grep -o '^[^$$]*$$' | sort
+diff --git a/inc/litmus/litmus_asm_in_macros.h b/inc/litmus/litmus_asm_in_macros.h
+index 3db4b8d..8781c80 100644
+--- a/inc/litmus/litmus_asm_in_macros.h
++++ b/inc/litmus/litmus_asm_in_macros.h
+@@ -45,8 +45,14 @@
+ #define STRINGIFY_4(a, ...) STRINGIFY_1(a), STRINGIFY_3(__VA_ARGS__)
+ #define STRINGIFY_5(a, ...) STRINGIFY_1(a), STRINGIFY_4(__VA_ARGS__)
+ #define STRINGIFY_6(a, ...) STRINGIFY_1(a), STRINGIFY_5(__VA_ARGS__)
+-#define STRINGIFY_N(a, b, c, d, e, f, n, ...) STRINGIFY_##n(a, b, c, d, e, f)
+-#define STRINGIFY(...) STRINGIFY_N(__VA_ARGS__, 6, 5, 4, 3, 2, 1)
++#define STRINGIFY_7(a, ...) STRINGIFY_1(a), STRINGIFY_6(__VA_ARGS__)
++#define STRINGIFY_8(a, ...) STRINGIFY_1(a), STRINGIFY_7(__VA_ARGS__)
++#define STRINGIFY_9(a, ...) STRINGIFY_1(a), STRINGIFY_8(__VA_ARGS__)
++#define STRINGIFY_10(a, ...) STRINGIFY_1(a), STRINGIFY_9(__VA_ARGS__)
++#define STRINGIFY_11(a, ...) STRINGIFY_1(a), STRINGIFY_10(__VA_ARGS__)
++#define STRINGIFY_12(a, ...) STRINGIFY_1(a), STRINGIFY_11(__VA_ARGS__)
++#define STRINGIFY_N(a, b, c, d, e, f, g, h, i, j, k, l, n, ...) STRINGIFY_##n(a, b, c, d, e, f, g, h, i, j, k, l)
++#define STRINGIFY(...) STRINGIFY_N(__VA_ARGS__, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1)
+ 
+ #define HUMANIZE_1(a, ...) HUMAN(a)
+ #define HUMANIZE_2(a, ...) HUMANIZE_1(a), HUMANIZE_1(__VA_ARGS__)
+@@ -69,4 +75,4 @@
+ #define BUILD_THREADS_5 BUILD_THREADS_4, (th_f*)P4
+ #define BUILD_THREADS_6 BUILD_THREADS_5, (th_f*)P5
+ 
+-#endif /* LITMUS_ASM_IN_MACROS_H */
+\ No newline at end of file
++#endif /* LITMUS_ASM_IN_MACROS_H */
