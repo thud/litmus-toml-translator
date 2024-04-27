@@ -1,3 +1,8 @@
+//! litmus.rs contains definitions for intermediate test data structure [`Litmus`].
+//!
+//! This file is mostly declarative code, defining how to represent a test, thread, exception
+//! handler etc.
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -10,6 +15,8 @@ use isla_lib::bitvector::{b64::B64, BV};
 
 use crate::error::{Error, Result};
 
+/// Main test data structure. Output of `parse` function in parse.rs and input to `write_output`
+/// function in output.rs.
 #[derive(Debug)]
 pub struct Litmus {
     pub arch: String,
@@ -26,12 +33,15 @@ pub struct Litmus {
     pub init_state: Vec<InitState>,
 }
 
+/// Wrapper type (mainly for `MovSrc`), allowing for negatable, expression-like representations.
+/// Used in assertion compilation.
 #[derive(Debug, Clone)]
 pub enum Negatable<T> {
     Eq(T),
     Not(T),
 }
 
+/// Representation of a thread for use by `Litmus` struct.
 #[derive(Debug)]
 pub struct Thread {
     pub name: String,
@@ -40,9 +50,11 @@ pub struct Thread {
     pub regs_clobber: HashSet<Reg>,
     pub vbar_el1: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
-    pub assert: Option<Vec<(Reg, Negatable<MovSrc>)>>, // Some(conjunction of reg-val pairs) or ..
-} // None if 'keep_histogram' cli option used.
+    pub assert: Option<Vec<(Reg, Negatable<MovSrc>)>>,
+} // assert field: Some(conjunction of reg-val pairs) or ..
+  //               None if 'keep_histogram' cli option used.
 
+/// Representation of a synchronous exception handler (similar to thread).
 #[derive(Debug)]
 pub struct ThreadSyncHandler {
     pub name: String,
@@ -51,6 +63,8 @@ pub struct ThreadSyncHandler {
     pub threads_els: Vec<(usize, u8)>, // (thread_no, el)
 }
 
+/// Convenient type for representing a value which could be moved into a register in assembly
+/// (eg. could move a natural number or the page table entry of a symbol).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MovSrc {
     Nat(B64),
@@ -62,6 +76,8 @@ pub enum MovSrc {
     Page(String),
 }
 
+/// Representation of a register. Note that most of these remain unused. Support for non X-W
+/// registers is not guaranteed since irrelevant in almost all tests.
 #[derive(Debug, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum Reg {
     X(u8), // X0..X30 General purpose reg (all 64 bits)
@@ -78,6 +94,7 @@ pub enum Reg {
     Isla(String),   // isla-specific register (ignored)
 }
 
+/// Representation of a line of output code to be formatted into `INIT_STATE` macro in C.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitState {
     Unmapped(String),
@@ -86,6 +103,7 @@ pub enum InitState {
 }
 
 impl MovSrc {
+    /// Update the inner binary value of a `MovSrc` with some function.
     pub fn map<F>(&self, f: F) -> Self
     where
         F: FnOnce(B64) -> B64,
@@ -98,6 +116,7 @@ impl MovSrc {
         }
     }
 
+    /// Get raw binary value inside a `MovSrc`.
     pub fn bits(&self) -> &B64 {
         match self {
             Self::Nat(bv) | Self::Bin(bv) | Self::Hex(bv) => bv,
@@ -105,6 +124,7 @@ impl MovSrc {
         }
     }
 
+    /// Translate `MovSrc` into string for output assembly.
     pub fn as_asm(&self) -> String {
         match self {
             Self::Nat(n) => format!("#{}", n.lower_u64()),
@@ -124,6 +144,7 @@ impl MovSrc {
         }
     }
 
+    /// Translate `MovSrc` into string for output C code (used in assertion compilation).
     pub fn as_c_code(&self) -> String {
         match self {
             Self::Nat(n) => format!("{}", n.lower_u64()),
@@ -303,6 +324,7 @@ impl fmt::Display for MovSrc {
 }
 
 impl Reg {
+    // Translate `Reg` variant into asm string.
     pub fn as_asm(&self) -> String {
         use Reg::*;
         match &self {
@@ -320,6 +342,7 @@ impl Reg {
         }
     }
 
+    /// Get inner index of some `Reg`.
     pub fn idx(&self) -> u8 {
         use Reg::*;
         match &self {
@@ -337,10 +360,12 @@ impl Reg {
         }
     }
 
+    /// Convert `Reg` into quoted assembly.
     pub fn as_asm_quoted(&self) -> String {
         format!("\"{}\"", self.as_asm())
     }
 
+    /// Convert `Reg` into harness-generated name of form `outp0r1` for register `x1` of thread 0.
     pub fn as_output_str(&self, thread_no: u8) -> String {
         match &self {
             Self::X(n) => format!("outp{thread_no}r{n}"),
@@ -349,6 +374,8 @@ impl Reg {
     }
 }
 
+/// Take block of asm and attempt to return all mentioned registers. This is used to generate a
+/// register clobber list.
 pub fn parse_regs_from_asm(asm: &str) -> Result<HashSet<Reg>> {
     let lines = asm.trim().split('\n');
     let mut hs = HashSet::new();
@@ -368,6 +395,7 @@ pub fn parse_regs_from_asm(asm: &str) -> Result<HashSet<Reg>> {
     Ok(hs)
 }
 
+/// Attempt to convert string into a register, checking for special register types.
 pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
     use Reg::*;
 
@@ -406,7 +434,7 @@ pub fn parse_reg_from_str(asm: &str) -> Result<Reg> {
     }
 }
 
-// TODO: generate unmapped vars if no other constraints
+/// Convert `page_table_setup` constraints into a list of [`InitState`] variants.
 pub fn gen_init_state(
     page_table_setup: &[page_table::setup::Constraint],
     symbolics: &Vec<String>,
@@ -443,6 +471,7 @@ pub fn gen_init_state(
     fill_unbacked_addrs(specified_inits, symbolics, &all_pas)
 }
 
+/// Fix list of [`InitState`] variants by looking for unbacked addrs and recomputing.
 fn fill_unbacked_addrs(
     specified_inits: Vec<InitState>,
     symbolics: &Vec<String>,
@@ -453,7 +482,7 @@ fn fill_unbacked_addrs(
     // so-far unbacked addresses with zeros.
     let mut tweaked_inits = specified_inits.clone();
 
-    // we create a simple graph where aliases correspond to edges (in case we have multiple aliases
+    // We create a simple graph where aliases correspond to edges (in case we have multiple aliases
     // for same physical address).
     let mut edges = HashMap::new();
     let mut unbacked_addrs = HashSet::new();
@@ -555,10 +584,6 @@ fn fill_unbacked_addrs(
     tweaked_inits = tweaked_inits.into_iter().filter(|init| !matches!(init, InitState::Alias(..))).collect::<Vec<_>>();
 
     tweaked_inits.extend(alias_directions.into_iter().map(|(from, to)| InitState::Alias(to, from)));
-
-    // for pa in unbacked_pas {
-    //     tweaked_inits.push(InitState::Var(pa.to_owned(), "0".to_owned()));
-    // }
 
     Ok(tweaked_inits)
 }

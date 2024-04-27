@@ -1,3 +1,9 @@
+//! parse.rs contains the main parsing functionality for `litmus-toml-translator`.
+//!
+//! The purpose of these functions is to translate a string of toml code into a [`Litmus`] object
+//! which encodes everything necessary to generate an equivalent C test for use by
+//! `system-litmus-harness`.
+
 use std::collections::{BTreeSet, HashMap};
 
 use once_cell::sync::Lazy;
@@ -15,6 +21,7 @@ use crate::arch;
 use crate::error::{Error, Result};
 use crate::litmus::{self, InitState, Litmus, MovSrc, Negatable, Reg, Thread, ThreadSyncHandler};
 
+/// Tallied results for many translations for statistics.
 #[derive(Debug, Default)]
 pub struct TranslationResults {
     pub succeeded: usize,
@@ -34,6 +41,7 @@ impl TranslationResults {
     }
 }
 
+/// Parse toml [`Value`] into a [`MovSrc`].
 fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
     let parsed = &axiomatic_litmus::parse_reset_value(unparsed_val, symtab)
         .map_err(|e| Error::ParseResetValue(e.to_string()))?;
@@ -41,6 +49,7 @@ fn parse_reset_val(unparsed_val: &Value, symtab: &Symtab) -> Result<MovSrc> {
     parsed.try_into()
 }
 
+/// Parse a list of resets into a mapping of registers to values.
 fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<HashMap<Reg, MovSrc>> {
     if let Some(unparsed_resets) = unparsed_resets {
         unparsed_resets
@@ -62,6 +71,8 @@ fn parse_resets(unparsed_resets: Option<&Value>, symtab: &Symtab) -> Result<Hash
     }
 }
 
+/// Merge a list of inits with a list of resets. This is necessary because of how Isla allows for
+/// both but they perform the same function in `system-litmus-harness`.
 fn merge_inits_resets(
     inits: HashMap<Reg, MovSrc>,
     resets: HashMap<Reg, MovSrc>,
@@ -79,6 +90,7 @@ fn merge_inits_resets(
     Ok((gp, special))
 }
 
+/// Parse a thread toml [`Value`] into a [`Thread`] type for use in the main [`Litmus`] struct.
 fn parse_thread(
     thread_name: &str,
     thread: &Value,
@@ -96,13 +108,8 @@ fn parse_thread(
             .ok_or_else(|| Error::ParseThread("thread code must be a string".to_string()))?,
         None => match thread.get("call") {
             Some(_call) => {
+                // This is left unimplemented for now since almost no tests use this syntax.
                 unimplemented!()
-                // TODO: implement call parsing
-                // let call = call.as_str().ok_or_else(|| "Thread call must be a string".to_string())?;
-                // let call = symtab
-                //     .get(&zencode::encode(call))
-                //     .ok_or_else(|| format!("Could not find function {}", call))?;
-                // Ok((thread_name.to_string(), ThreadBody::Call(call)))
             }
             None => Err(Error::ParseThread(format!("No code or call found for thread {}", thread_name)))?,
         },
@@ -156,6 +163,7 @@ fn parse_thread(
     })
 }
 
+/// Take 'section' toml [`Value`] and translate into a [`ThreadSyncHandler`] type.
 fn parse_thread_sync_handler_from_section(
     handler_name: &str,
     handler: &Value,
@@ -202,6 +210,7 @@ fn parse_thread_sync_handler_from_section(
     }
 }
 
+/// Extract list of registers from final assertion (used when keeping histogram).
 fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> Result<BTreeSet<(u8, Reg)>> {
     fn extract_regs_from_exp(symtab: &Symtab, set: &mut BTreeSet<(u8, Reg)>, exp: Exp<String>) -> Result<()> {
         match exp {
@@ -242,6 +251,10 @@ fn regs_from_final_assertion(symtab: &Symtab, final_assertion: Exp<String>) -> R
     Ok(set)
 }
 
+/// Check if an assertion is allowed (only conjunctions translatable if not keeping histogram) and
+/// convert into a list of register-value pairs
+///
+/// For example, `1:X0=1 & ~1:X2=0` goes to `[((1, X(0)), Eq(1)), ((1, X(2)), Not(0))]`.
 fn parse_assertion_into_conjunction_of_regs(
     symtab: &Symtab,
     final_assertion: Exp<String>,
@@ -301,6 +314,7 @@ fn parse_assertion_into_conjunction_of_regs(
     Ok(reg_val_pairs.into_iter().collect())
 }
 
+/// Get any additional variable names from the page table setup of a toml test.
 fn get_additional_vars_from_pts(
     page_table_setup: &Vec<page_table::setup::Constraint>,
     existing_vars: Vec<String>,
@@ -345,6 +359,8 @@ fn get_additional_vars_from_pts(
     Ok(all_vars.difference(&existing_vars).cloned().collect())
 }
 
+/// Main parsing function taking a raw string and attempting to a return a [`Litmus`]
+/// representation of the same test.
 pub fn parse(contents: &str, keep_histogram: bool) -> Result<Litmus> {
     let litmus_toml = contents.parse::<Value>().map_err(Error::ParseToml)?;
 

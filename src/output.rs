@@ -5,6 +5,7 @@ use crate::litmus::{InitState, Litmus, MovSrc, Negatable, Reg};
 
 const INCLUDES: &str = "#include \"lib.h\"";
 
+/// Rename test for name of `litmus_test_t` object in final C code output.
 fn sanitised_test_name(name: &str) -> String {
     name.chars()
         .filter_map(|c| match c {
@@ -19,6 +20,8 @@ fn sanitised_test_name(name: &str) -> String {
         .collect()
 }
 
+/// Generate list of substitutions for a given thread. These are the lines after immediately after
+/// blocks of assembly.
 fn asm_subs_from_thread_reset(
     reset: HashMap<Reg, MovSrc>,
     thread_assert: &Option<Vec<(Reg, Negatable<MovSrc>)>>,
@@ -107,6 +110,8 @@ fn asm_subs_from_thread_reset(
     Ok(res.join(",\n    "))
 }
 
+/// Main output control flow. Attempt to convert [`Litmus`] test representation into a C code test
+/// (encoded as a string).
 pub fn write_output(litmus: Litmus, keep_histogram: bool) -> Result<String> {
     // println!("{litmus:#?}");
     let name = litmus.name;

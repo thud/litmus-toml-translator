@@ -1,3 +1,8 @@
+//! litmus-toml-translator tool for litmus test translation.
+//!
+//! This file includes the main control loop of the binary. It contains all file system and user
+//! interface functionality.
+
 mod arch;
 mod error;
 mod litmus;
@@ -12,6 +17,7 @@ use clap::{CommandFactory, Parser};
 use colored::*;
 use is_terminal::IsTerminal;
 
+/// User interface (CLI) structure which specifies all operations supported by the tool.
 #[derive(Debug, Parser)]
 #[command(name = "litmus-toml-translator")]
 #[command(author = "thud <thud@thud.dev>")]
@@ -43,15 +49,18 @@ struct Cli {
     verbose: u8,
 }
 
+/// Translate toml into `Litmus` then output string (C code).
 fn process_toml(raw_toml: String, keep_histogram: bool) -> error::Result<String> {
     let parsed_litmus = parse::parse(&raw_toml, keep_histogram)?;
     output::write_output(parsed_litmus, keep_histogram)
 }
 
+/// Check if a file is toml (by checking file extension).
 fn is_toml(p: &Path) -> bool {
     p.extension().filter(|ext| ext.to_str().unwrap() == "toml").is_some()
 }
 
+// Recursively translate a path, descending into directories to find all descendent toml tests.
 fn process_path(
     file_or_dir: &Path,
     out_dir: &Path,
@@ -163,6 +172,7 @@ fn log_results(results: parse::TranslationResults) {
     );
 }
 
+/// Main control flow.
 fn main() {
     let cli = Cli::parse();
 
@@ -194,6 +204,7 @@ fn main() {
     let mut results = parse::TranslationResults::default();
 
     match cli.input {
+        // If Some(paths), then read file(s) and output to files (or stdout).
         Some(paths) => {
             if paths.len() == 1 {
                 let path = &paths[0]; //.canonicalize().unwrap();
@@ -236,6 +247,7 @@ fn main() {
                 }
             }
         }
+        // If no paths, then attempt to read from stdin or print help.
         None => {
             let stdin = std::io::stdin();
             if stdin.is_terminal() {
