@@ -3,7 +3,7 @@
 //! This file is mostly declarative code, defining how to represent a test, thread, exception
 //! handler etc.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, BTreeSet};
 use std::fmt;
 
 use once_cell::sync::Lazy;
@@ -47,7 +47,7 @@ pub struct Thread {
     pub name: String,
     pub code: String,
     pub el: u8,
-    pub regs_clobber: HashSet<Reg>,
+    pub regs_clobber: BTreeSet<Reg>,
     pub vbar_el1: Option<B64>,
     pub reset: HashMap<Reg, MovSrc>,
     pub assert: Option<Vec<(Reg, Negatable<MovSrc>)>>,
@@ -59,7 +59,7 @@ pub struct Thread {
 pub struct ThreadSyncHandler {
     pub name: String,
     pub code: String,
-    pub regs_clobber: HashSet<Reg>,
+    pub regs_clobber: BTreeSet<Reg>,
     pub threads_els: Vec<(usize, u8)>, // (thread_no, el)
 }
 
@@ -376,9 +376,9 @@ impl Reg {
 
 /// Take block of asm and attempt to return all mentioned registers. This is used to generate a
 /// register clobber list.
-pub fn parse_regs_from_asm(asm: &str) -> Result<HashSet<Reg>> {
+pub fn parse_regs_from_asm(asm: &str) -> Result<BTreeSet<Reg>> {
     let lines = asm.trim().split('\n');
-    let mut hs = HashSet::new();
+    let mut hs = BTreeSet::new();
     for line in lines {
         let line = match line.split_once(';') {
             Some((instr, _comment)) => instr,
@@ -440,7 +440,7 @@ pub fn gen_init_state(
     symbolics: &Vec<String>,
 ) -> Result<Vec<InitState>> {
     use page_table::setup::{AddressConstraint, Constraint, Exp, TableConstraint};
-    let mut all_pas = HashSet::new();
+    let mut all_pas = BTreeSet::new();
     let specified_inits = page_table_setup
         .iter()
         .filter_map(|constraint| match constraint {
@@ -475,7 +475,7 @@ pub fn gen_init_state(
 fn fill_unbacked_addrs(
     specified_inits: Vec<InitState>,
     symbolics: &Vec<String>,
-    pas: &HashSet<String>,
+    pas: &BTreeSet<String>,
 ) -> Result<Vec<InitState>> {
     // Many Isla tests omit initial values for some addresses. This causes problems for
     // system-litmus-harness since aliases should be backed by heap memory. Here, we initialise any
@@ -485,7 +485,7 @@ fn fill_unbacked_addrs(
     // We create a simple graph where aliases correspond to edges (in case we have multiple aliases
     // for same physical address).
     let mut edges = HashMap::new();
-    let mut unbacked_addrs = HashSet::new();
+    let mut unbacked_addrs = BTreeSet::new();
     let mut backed_addrs = HashMap::new();
     let mut alias_directions: Vec<(String, String)> = vec![];
 
