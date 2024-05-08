@@ -13,3 +13,6 @@ Stacked2BBM.litmus.toml                         # typo in toml test
 MP.RTT.inv3+dmb-dmb+dsb-isb.litmus.toml         # some unhandled exception
 RWC.RTR.EL1+ctrl-isb+dsb-tlbi-dsb.litmus.toml   # some unhandled exception
 UpdateWhileUnmappedFull.litmus.toml             # some unhandled exception
+
+CoWTf.inv+svc.litmus.toml               # fails on bare metal AWS not local emulation?
+                                        # ...(idx_from_regname)] ! err: no such register "p0:x0".
