@@ -1,3 +1,9 @@
+*This tool has now been incorporated into
+[rems-project/system-litmus-harness](https://github.com/rems-project/system-litmus-harness)  and is
+no longer under active development in this repo. See
+[system-litmus-harness/tools/litmus-toml-translator](https://github.com/rems-project/system-litmus-harness/tree/master/tools/litmus-toml-translator)
+for the current version of this tool.*
+
 # Litmus Test Translator
 
 `litmus-toml-translator` is a tool for converting [Isla](https://github.com/rems-project/isla)-style
